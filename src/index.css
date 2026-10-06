@@ -1,0 +1,184 @@
+@import "tailwindcss";
+
+/* JetBrains Mono Nerd Font, bundled (SIL OFL 1.1, see assets/fonts/OFL.txt), so the IDE
+   looks the same on every machine whether or not the font is installed. */
+@font-face {
+  font-family: "JetBrainsMono Nerd Font";
+  src: url("./assets/fonts/JetBrainsMonoNerdFont-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "JetBrainsMono Nerd Font";
+  src: url("./assets/fonts/JetBrainsMonoNerdFont-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "JetBrainsMono Nerd Font";
+  src: url("./assets/fonts/JetBrainsMonoNerdFont-SemiBold.ttf") format("truetype");
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "JetBrainsMono Nerd Font";
+  src: url("./assets/fonts/JetBrainsMonoNerdFont-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "JetBrainsMono Nerd Font";
+  src: url("./assets/fonts/JetBrainsMonoNerdFont-Italic.ttf") format("truetype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+}
+
+/* One font everywhere (UI, panels, editor): JetBrains Mono Nerd Font, then plain
+   JetBrains Mono, then the old fallbacks. Tailwind's font-sans and font-mono both use it. */
+@theme {
+  --font-app: "JetBrainsMono Nerd Font", "JetBrainsMono NF", "JetBrainsMono Nerd Font Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
+  --font-sans: var(--font-app);
+  --font-mono: var(--font-app);
+}
+
+:root {
+  /* Surfaces: Pure Black OLED Dark Theme */
+  --theme-bg-app: #000000;
+  --theme-bg-header: #000000;
+  --theme-bg-sidebar: #000000;
+  --theme-bg-panel: #000000;
+  --theme-bg-panel-header: #0a0a0a;
+  --theme-bg-panel-subtle: #050505;
+  --theme-bg-input: #0a0a0a;
+  --theme-bg-hover: #171717;
+  --theme-bg-active: #262626;
+
+  /* Borders: Neutral Dark */
+  --theme-border: #222222;
+  --theme-border-subtle: #171717;
+  --theme-border-focus: #525252;
+
+  /* Typography */
+  --theme-text-primary: #ffffff;
+  --theme-text-secondary: #a3a3a3;
+  --theme-text-muted: #737373;
+
+  /* Buttons & Badges: Neutral Black */
+  --theme-btn-primary: #171717;
+  --theme-btn-primary-hover: #262626;
+  --theme-btn-primary-text: #ffffff;
+
+  /* Editor Canvas: VS Code Dark+ */
+  --theme-editor-bg: #1e1e1e;
+  --theme-editor-gutter: #1e1e1e;
+  --theme-editor-active-line: #2a2a2a;
+}
+
+/* Reusable Theme Utilities */
+.theme-app {
+  background-color: var(--theme-bg-app);
+  color: var(--theme-text-primary);
+}
+
+.theme-header {
+  background-color: var(--theme-bg-header);
+  border-color: var(--theme-border);
+}
+
+.theme-sidebar {
+  background-color: var(--theme-bg-sidebar);
+  border-color: var(--theme-border);
+}
+
+.theme-panel {
+  background-color: var(--theme-bg-panel);
+  border-color: var(--theme-border);
+}
+
+.theme-panel-header {
+  background-color: var(--theme-bg-panel-header);
+  border-color: var(--theme-border);
+}
+
+.theme-panel-subtle {
+  background-color: var(--theme-bg-panel-subtle);
+  border-color: var(--theme-border);
+}
+
+.theme-input {
+  background-color: var(--theme-bg-input);
+  border-color: var(--theme-border);
+  color: var(--theme-text-primary);
+}
+
+.theme-input:focus {
+  border-color: var(--theme-border-focus);
+}
+
+.theme-btn-primary {
+  background-color: var(--theme-btn-primary);
+  color: var(--theme-btn-primary-text);
+  border: 1px solid var(--theme-border);
+}
+
+.theme-btn-primary:hover {
+  background-color: var(--theme-btn-primary-hover);
+}
+
+.theme-editor-canvas {
+  background-color: var(--theme-editor-bg);
+}
+
+.theme-editor-gutter {
+  background-color: var(--theme-editor-gutter);
+  border-color: var(--theme-border);
+}
+
+/* Only paint the editor's outer container, so there's no light flash before
+   Monaco's own theme takes over. Do NOT touch Monaco's inner view layers —
+   forcing those repaints decorations (current line, selection, word highlight)
+   as white boxes. Monaco's st-dark theme handles the real background. */
+.monaco-editor,
+.monaco-editor .overflow-guard {
+  background-color: var(--theme-editor-bg);
+}
+/* Debugger decorations in the Monaco gutter and text (Editor.tsx). */
+.debug-breakpoint,
+.debug-breakpoint-unverified {
+  cursor: pointer;
+}
+.debug-breakpoint::before,
+.debug-breakpoint-unverified::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: #e51400;
+}
+.debug-breakpoint-unverified::before {
+  background: transparent;
+  border: 1.5px solid #848484;
+}
+.debug-current-line {
+  background: rgba(255, 204, 0, 0.18);
+  outline: 1px solid rgba(255, 204, 0, 0.45);
+}
+.debug-current-arrow::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  margin: -6px 0 0 -3px;
+  border-style: solid;
+  border-width: 6px 0 6px 8px;
+  border-color: transparent transparent transparent #ffcc00;
+}
