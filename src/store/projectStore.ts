@@ -27,6 +27,8 @@ interface ProjectState {
     setPrograms: (programs: PLCProgram[]) => void;
     /** Replace the I/O mappings (saved in project.json). */
     setIoMappings: (mappings: IoMapping[]) => void;
+    /** Take I/O mappings and breakpoints from project.json edited outside the IDE (already saved). */
+    adoptExternal: (changes: Pick<PLCProject, "io" | "breakpoints">) => void;
     setCompiled: (path: string, record: CompileRecord) => void;
     setCompiling: (paths: string[]) => void;
     /** Replace one file's breakpoints (saved in project.json). */
@@ -56,6 +58,7 @@ export const useProjectStore = create<ProjectState>((set) => ({
     setTree: (tree) => set({ tree }),
     setPrograms: (programs) => set((s) => (s.project ? { project: { ...s.project, programs }, dirty: true } : s)),
     setIoMappings: (mappings) => set((s) => (s.project ? { project: { ...s.project, io: { mappings } }, dirty: true } : s)),
+    adoptExternal: (changes) => set((s) => (s.project ? { project: { ...s.project, ...changes } } : s)),
     setCompiled: (path, record) => set((s) => ({ compiled: { ...s.compiled, [path]: record } })),
     setCompiling: (compiling) => set({ compiling }),
     setBreakpoints: (path, lines) =>

@@ -26,7 +26,7 @@ import type { FileNode, PLCProject } from "../types/project";
 import { useProjectStore } from "./projectStore";
 import { useEditorStore, isDirty } from "./editorStore";
 import { useUIStore } from "./uiStore";
-import { checkIoMappings, stopIfActive } from "./runActions";
+import { checkIoMappings, stopIfActive, syncBreakpoints } from "./runActions";
 
 const RECENTS_KEY = "myplc.recentProjects";
 
@@ -127,6 +127,10 @@ export async function refreshTree(): Promise<void> {
         fail(e);
         return;
     }
+    if (await adoptProjectFile(project.rootPath)) {
+        await checkIoMappings(); // validate, and apply to a running PLC
+        await syncBreakpoints();
+    }
     const store = useProjectStore.getState();
     if (store.project?.rootPath !== project.rootPath) return; // switched projects meanwhile
     // MyPLC's own files stay out of the Explorer, so they can't be edited or deleted there.
@@ -137,6 +141,28 @@ export async function refreshTree(): Promise<void> {
         store.setPrograms(programs);
         await persistProjectJson();
     }
+}
+
+/**
+ * project.json may have been edited outside the IDE (by hand, a tool, git): take its I/O
+ * mappings and breakpoints, so the open project doesn't keep stale ones and later save
+ * them over the file. Only when the IDE has no unsaved project changes of its own (it
+ * saves those right away). Returns whether anything changed.
+ */
+async function adoptProjectFile(rootPath: string): Promise<boolean> {
+    let disk: PLCProject;
+    try {
+        disk = fromProjectFile(await fsApi.readProject(rootPath), rootPath);
+    } catch {
+        return false; // unreadable right now: keep what the IDE has
+    }
+    const store = useProjectStore.getState();
+    const current = store.project;
+    if (!current || current.rootPath !== rootPath || store.dirty) return false;
+    const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+    if (same(current.io, disk.io) && same(current.breakpoints, disk.breakpoints)) return false;
+    store.adoptExternal({ io: disk.io, breakpoints: disk.breakpoints });
+    return true;
 }
 
 /** Open a project file in a tab (or focus it if already open). */
