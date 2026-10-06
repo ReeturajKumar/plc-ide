@@ -1,8 +1,9 @@
-/** Mirrors the Rust `simulator::state` and `st::error` types. */
+/**
+ * Mirrors the Rust compiler and I/O types (`compiler::error`, `compiler::project`, `io`).
+ * The runtime's own messages and state are in `protocol.ts`.
+ */
 
-export type RuntimeStatus = "STOPPED" | "RUNNING" | "PAUSED";
-
-/** Mirrors Rust `st::error::ErrorKind`. */
+/** Mirrors Rust `compiler::error::ErrorKind`. */
 export type ErrorKind =
     | "Syntax"
     | "UndeclaredVariable"
@@ -32,75 +33,6 @@ export interface StError {
 }
 
 export type DataType = "BOOL" | "INT" | "DINT" | "REAL" | "TIME";
-
-export interface VariableSnapshot {
-    /** The program that declares it. */
-    program: string;
-    name: string;
-    dataType: DataType;
-    /** BOOL → boolean; INT, DINT, REAL → number; TIME → milliseconds. */
-    value: boolean | number;
-    /** Never assigned by the program, so the simulator lets the user drive it. */
-    isInput: boolean;
-    /** The I/O address it is mapped to (it then follows that input / drives that output). */
-    io: string | null;
-}
-
-export interface MemberSnapshot {
-    name: string;
-    dataType: DataType;
-    value: boolean | number;
-    /** Outputs (Q, ET, CV) are read-only; inputs (IN, PT, …) are set in calls. */
-    isOutput: boolean;
-    /** A user block's internal variable, shown read-only for debugging. */
-    isInternal: boolean;
-}
-
-/** A function block instance, e.g. `RunTimer : TON`. */
-export interface FunctionBlockSnapshot {
-    program: string;
-    name: string;
-    blockType: string;
-    members: MemberSnapshot[];
-}
-
-export interface RuntimeState {
-    status: RuntimeStatus;
-    /** The loaded programs, in execution order. */
-    programs: string[];
-    cycleCount: number;
-    scanTimeMs: number;
-    /** Plain variables. */
-    variables: VariableSnapshot[];
-    functionBlocks: FunctionBlockSnapshot[];
-    /** Set when a scan failed and stopped the runtime. */
-    error: StError | null;
-    /** The program `error` happened in. */
-    errorProgram: string | null;
-    /** Simulated I/O: inputs as the user set them, outputs as the last scan wrote them. */
-    io: IoPoint[];
-    /** Debugger: the statement the PLC is paused before (null when paused between scans). */
-    location: DebugLocation | null;
-}
-
-export interface DebugLocation {
-    /** The program whose scan is running (the caller when inside a function block). */
-    program: string;
-    /** Source file of the statement (registry name): the program's or the block's. */
-    file: string;
-    line: number;
-    column: number;
-    /** Set when paused inside a user function block. */
-    functionBlock: string | null;
-    /** The instance running it, e.g. "Counter1". */
-    instance: string | null;
-}
-
-/** A breakpoint on a program's source line. */
-export interface Breakpoint {
-    program: string;
-    line: number;
-}
 
 export type IoKind = "DigitalInput" | "DigitalOutput" | "AnalogInput" | "AnalogOutput";
 

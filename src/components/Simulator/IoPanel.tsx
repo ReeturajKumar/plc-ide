@@ -5,7 +5,7 @@ import { checkIoMappings, IO_MAPPING_PATH, loadIoState, setIoInput, type Declare
 import { useConsoleStore } from "../../store/consoleStore";
 import { clearIoMappings, setIoMapping } from "../../store/projectActions";
 import type { FbSummary, IoKind, IoPoint } from "../../types/runtime";
-import { runtimeApi } from "../../utils/tauri";
+import { compilerApi } from "../../services/runtimeApi";
 import { formatValue, valueClass } from "./format";
 
 const GROUPS: { kind: IoKind; title: string }[] = [
@@ -208,7 +208,7 @@ const IoPanel = () => {
     const fileKinds = useProjectStore((s) => s.fileKinds);
     const [standard, setStandard] = useState<FbSummary[]>([]);
     useEffect(() => {
-        runtimeApi.standardFunctionBlocks().then(setStandard).catch((e) => console.error("[io]", e));
+        compilerApi.standardFunctionBlocks().then(setStandard).catch((e) => console.error("[io]", e));
     }, []);
     const blockTypes = [...standard, ...Object.values(fileKinds).flatMap((k) => k.functionBlocks)];
 

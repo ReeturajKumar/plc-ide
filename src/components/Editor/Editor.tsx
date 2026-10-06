@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import MonacoEditor, { useMonaco, type OnMount, type BeforeMount } from "@monaco-editor/react";
 import { useEditorStore, isDirty } from "../../store/editorStore";
 import { closeTab, copyToClipboard, projectPath } from "../../store/projectActions";
@@ -141,7 +141,7 @@ const Editor = () => {
     const breakpoints = useProjectStore((s) => (activePath ? s.project?.breakpoints?.[activePath] : undefined));
     const breakable = useProjectStore((s) => (activePath ? s.breakableLines[activePath] : undefined));
     const status = useSimulatorStore((s) => s.runtime.status);
-    const location = useSimulatorStore((s) => s.runtime.location);
+    const location = useSimulatorStore((s) => s.runtime.debugger.location);
 
     const active = openFiles.find((f) => f.path === activePath) ?? null;
 
@@ -200,6 +200,12 @@ const Editor = () => {
     // Editing is off while the PLC runs or is paused: the running code must match the source.
     const builtin = active ? isBuiltinPath(active.path) : false;
     const readOnly = builtin || status !== "STOPPED";
+    // Where a content change belongs, read when the change happens (not from the render
+    // that subscribed the handler): when another file opens, @monaco-editor/react loads a
+    // read-only editor's text with setValue and reports it to the handler it subscribed for
+    // the previous file. A read-only editor can't be typed into, so such changes are ignored.
+    const changeTarget = useRef({ path: "", readOnly: true });
+    changeTarget.current = { path: active?.path ?? "", readOnly };
     const wordWrap = useUIStore((s) => s.wordWrap);
     const minimap = useUIStore((s) => s.minimap);
     const isSt = active ? languageFor(active.path).id === "st" : false;
@@ -312,7 +318,10 @@ const Editor = () => {
                         language={languageFor(active.path).id}
                         theme="st-dark"
                         value={active.content}
-                        onChange={(v) => updateContent(active.path, v ?? "")}
+                        onChange={(v) => {
+                            const { path, readOnly } = changeTarget.current;
+                            if (path && !readOnly) updateContent(path, v ?? "");
+                        }}
                         beforeMount={setupStructuredText}
                         onMount={onEditorMount}
                         loading={<div className="h-full w-full theme-editor-canvas" />}

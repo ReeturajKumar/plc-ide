@@ -1,6 +1,8 @@
-import { fsApi, runtimeApi } from "../utils/tauri";
+import { fsApi } from "../utils/tauri";
+import { compilerApi, runtimeApi, runtimeState, toRuntimeError } from "../services/runtimeApi";
 import { baseName } from "../utils/project";
-import type { CompileReport, CompileResult, RuntimeState, StError } from "../types/runtime";
+import type { CompileReport, CompileResult, StError } from "../types/runtime";
+import type { RuntimeState } from "../types/protocol";
 import type { PLCProgram } from "../types/program";
 import { useEditorStore } from "./editorStore";
 import { useProjectStore } from "./projectStore";
@@ -10,32 +12,18 @@ import { useSimulatorStore } from "./simulatorStore";
 import { openFile, persistProjectJson } from "./projectActions";
 import { revealPosition } from "../utils/editorRef";
 
-// The Rust scan loop runs on its own clock; the UI mirrors it by polling at the
-// default scan rate. Events would be the upgrade if scan times drop well below this.
-const POLL_MS = 100;
-let pollTimer: ReturnType<typeof setInterval> | null = null;
-
 const stamp = () => new Date().toLocaleTimeString();
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
-function isStError(e: unknown): e is StError {
-    return typeof e === "object" && e !== null && "message" in e && "line" in e && "column" in e;
-}
-
-function isCompileReport(e: unknown): e is CompileReport {
-    return typeof e === "object" && e !== null && "programs" in e && "mapping" in e && Array.isArray(e.mapping);
-}
 
 /** Problems with the I/O mappings aren't in a file; they're listed under this pseudo-path. */
 export const IO_MAPPING_PATH = "#io-mapping";
 
 const ioMappings = () => useProjectStore.getState().project?.io?.mappings ?? [];
 
-/** The error a control command was refused with. */
+/** The error a request was refused with, as one StError. */
 function toStError(e: unknown): StError {
-    if (isStError(e)) return e;
-    console.error("[runtime]", e);
-    return { kind: "General", line: 0, column: 0, message: "The PLC runtime is not available." };
+    const error = toRuntimeError(e);
+    return error.stError ?? { kind: "General", line: 0, column: 0, message: error.message };
 }
 
 export function formatStError(e: StError): string {
@@ -125,7 +113,7 @@ async function compile(items: ProgramText[], only: ProgramText[], title: string)
     ps.setCompiling(only.map((i) => i.program.path));
     let report: CompileReport;
     try {
-        report = await runtimeApi.compile(toSources(items), ioMappings());
+        report = await compilerApi.compile(toSources(items), ioMappings());
     } catch (e) {
         useUIStore.getState().notify("error", toStError(e).message);
         return false;
@@ -145,7 +133,7 @@ export async function diagnose(path: string): Promise<StError[] | null> {
     const items = await projectSources();
     const index = items?.findIndex((i) => i.program.path === path) ?? -1;
     if (!items || index < 0) return null;
-    const report = await runtimeApi.compile(toSources(items), ioMappings());
+    const report = await compilerApi.compile(toSources(items), ioMappings());
     useProjectStore.getState().setBreakableLines(path, report.programs[index]?.lines ?? []);
     const result = report.programs[index];
     if (result) useProjectStore.getState().setFileKind(path, { hasProgram: result.hasProgram, functionBlocks: result.functionBlocks });
@@ -179,17 +167,6 @@ export async function compileCurrent(): Promise<boolean> {
     return compile(items, [current], `Compile ${current.program.name}`);
 }
 
-function startPolling(): void {
-    if (!pollTimer) pollTimer = setInterval(() => void refresh(), POLL_MS);
-}
-
-function stopPolling(): void {
-    if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-    }
-}
-
 /** A scan failed: show it in the simulator panel, Problems (on its program) and Output. */
 function reportScanError(error: StError, programName: string | null): void {
     const program = useProjectStore.getState().project?.programs.find((p) => p.name === programName);
@@ -211,7 +188,7 @@ export function locationPath(file: string): string | undefined {
 
 /** The debugger stopped somewhere new: open that source (program or block) at the line. */
 function followLocation(state: RuntimeState): void {
-    const loc = state.location;
+    const loc = state.debugger.location;
     const key = loc ? `${loc.file}:${loc.line}:${loc.instance ?? ""}:${state.cycleCount}` : null;
     if (key === shownLocation) return;
     shownLocation = key;
@@ -227,18 +204,9 @@ function applyState(state: RuntimeState): void {
     followLocation(state);
     // A failing scan stops the runtime and leaves its error in every later snapshot; report it once.
     const shown = sim.errors.length === 1 ? formatStError(sim.errors[0]) : null;
-    if (state.error && formatStError(state.error) !== shown) reportScanError(state.error, state.errorProgram);
-    if (state.status === "STOPPED") stopPolling();
-    else startPolling();
-}
-
-async function refresh(): Promise<void> {
-    try {
-        applyState(await runtimeApi.getState());
-    } catch (e) {
-        stopPolling();
-        reportScanError(toStError(e), null);
-    }
+    if (state.error && formatStError(state.error.error) !== shown) reportScanError(state.error.error, state.error.program);
+    if (state.status === "STOPPED") runtimeState.unwatch();
+    else runtimeState.watch(applyState, (e) => reportScanError(toStError(e), null));
 }
 
 /** Run a control command; show a toast instead of throwing when it's refused. */
@@ -276,7 +244,7 @@ export async function runProgram(paused = false): Promise<boolean> {
     ps.setCompiling(items.map((i) => i.program.path));
     await syncBreakpoints(); // the runtime may have restarted since they were set
     try {
-        const state = await runtimeApi.start(toSources(items), ioMappings(), paused);
+        const state = await (paused ? runtimeApi.load : runtimeApi.run)(toSources(items), ioMappings());
         ps.setCompiling([]);
         // Everything compiled from exactly these sources.
         for (const { program, source } of items) {
@@ -294,10 +262,12 @@ export async function runProgram(paused = false): Promise<boolean> {
     } catch (e) {
         ps.setCompiling([]);
         // Nothing runs.
-        stopPolling();
+        runtimeState.unwatch();
         sim.setRuntime({ ...sim.runtime, status: "STOPPED", cycleCount: 0, programs: [], variables: [], functionBlocks: [] });
-        if (isCompileReport(e)) {
-            sim.setErrors(reportCompile(items, e.programs, e.mapping, "Compile All"));
+        const error = toRuntimeError(e);
+        if (error.code === "COMPILATION_ERROR") {
+            const report = error.details as CompileReport;
+            sim.setErrors(reportCompile(items, report.programs, report.mapping, "Compile All"));
             cs.appendOutput(["  Runtime not started.", ""]);
         } else {
             reportScanError(toStError(e), null);
@@ -328,7 +298,7 @@ export async function resumeProgram(): Promise<void> {
 /** STEP SCAN (while paused): finish the current scan, or run one complete scan. */
 export async function stepProgram(): Promise<void> {
     if (useSimulatorStore.getState().runtime.status !== "PAUSED") return;
-    if (await control(runtimeApi.step)) {
+    if (await control(runtimeApi.stepScan)) {
         const { cycleCount } = useSimulatorStore.getState().runtime;
         useConsoleStore.getState().appendOutput([`[${stamp()}] ⏭ Step — scan ${cycleCount} complete`]);
     }
@@ -343,7 +313,7 @@ export async function stepStatement(): Promise<void> {
 /** Send every breakpoint (file name + line) to the runtime, which does the stopping. */
 export async function syncBreakpoints(): Promise<void> {
     const project = useProjectStore.getState().project;
-    const list = (project?.programs ?? []).flatMap((p) => (project?.breakpoints?.[p.path] ?? []).map((line) => ({ program: p.name, line })));
+    const list = (project?.programs ?? []).flatMap((p) => (project?.breakpoints?.[p.path] ?? []).map((line) => ({ file: p.name, line })));
     await control(() => runtimeApi.setBreakpoints(list));
 }
 
@@ -375,7 +345,7 @@ export function runOrResume(): void {
 
 /** Set a simulated input (DI: true/false, AI: a number); the next scan reads it. */
 export async function setIoInput(address: string, value: boolean | number): Promise<void> {
-    await control(() => runtimeApi.setIoInput(address, value));
+    await control(() => (typeof value === "boolean" ? runtimeApi.setDigitalInput(address, value) : runtimeApi.setAnalogInput(address, value)));
 }
 
 /** A variable a program declares, as the I/O mapping fields suggest it. */
@@ -395,7 +365,7 @@ export async function checkIoMappings(): Promise<DeclaredVariable[] | null> {
     if (!items) return null;
     const mappings = ioMappings();
     try {
-        const report = await runtimeApi.compile(toSources(items), mappings);
+        const report = await compilerApi.compile(toSources(items), mappings);
         let errors = report.mapping;
         // A mapping the compiler accepts is applied to the running/paused PLC at once.
         if (errors.length === 0 && useSimulatorStore.getState().runtime.status !== "STOPPED") {
@@ -416,7 +386,7 @@ export async function refreshFileKinds(): Promise<void> {
     const items = await projectSources();
     if (!items) return;
     try {
-        const report = await runtimeApi.compile(toSources(items), ioMappings());
+        const report = await compilerApi.compile(toSources(items), ioMappings());
         const ps = useProjectStore.getState();
         items.forEach(({ program }, i) => {
             const r = report.programs[i];
@@ -437,7 +407,7 @@ export async function loadIoState(): Promise<void> {
 }
 
 export async function toggleInput(program: string, name: string, current: boolean): Promise<void> {
-    await control(() => runtimeApi.setInput(program, name, !current));
+    await control(() => runtimeApi.setVariable(program, name, !current));
 }
 
 /** Stop the simulator if it's active — used when the project it came from goes away. */

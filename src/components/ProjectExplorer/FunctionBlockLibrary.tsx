@@ -7,7 +7,7 @@ import ContextMenu from "../common/ContextMenu";
 import { useProjectStore } from "../../store/projectStore";
 import { useUIStore } from "../../store/uiStore";
 import { refreshFileKinds } from "../../store/runActions";
-import { runtimeApi } from "../../utils/tauri";
+import { compilerApi } from "../../services/runtimeApi";
 import { insertFunctionBlock } from "../../utils/editorRef";
 import { FB_DRAG_TYPE } from "../../utils/fbInsert";
 import type { FbSummary } from "../../types/runtime";
@@ -130,7 +130,7 @@ const FunctionBlockLibrary = () => {
 
     useEffect(() => {
         if (standardCache) return;
-        runtimeApi
+        compilerApi
             .standardFunctionBlocks()
             .then((list) => setStandard((standardCache = list)))
             .catch((e) => console.error("[library]", e));

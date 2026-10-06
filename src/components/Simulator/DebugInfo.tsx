@@ -8,7 +8,7 @@ import { locationPath } from "../../store/runActions";
  */
 const DebugInfo = () => {
     const status = useSimulatorStore((s) => s.runtime.status);
-    const location = useSimulatorStore((s) => s.runtime.location);
+    const location = useSimulatorStore((s) => s.runtime.debugger.location);
     const path = location ? locationPath(location.file) : undefined;
     // The statement's text, from the open file (the debugger opens it when it stops).
     const statement = useEditorStore((s) =>

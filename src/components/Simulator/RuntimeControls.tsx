@@ -1,5 +1,5 @@
 import Button from "../common/Button";
-import type { RuntimeStatus } from "../../types/runtime";
+import type { RuntimeStatus } from "../../types/protocol";
 import { pauseProgram, resumeProgram, runProgram, stepProgram, stepStatement, stopProgram } from "../../store/runActions";
 
 /**

@@ -37,7 +37,7 @@ const Panel = () => {
     const togglePanelMaximized = useUIStore((s) => s.togglePanelMaximized);
     const output = useConsoleStore((s) => s.output);
     const problems = useConsoleStore((s) => s.problems);
-    const debugLocation = useSimulatorStore((s) => s.runtime.location);
+    const debugLocation = useSimulatorStore((s) => s.runtime.debugger.location);
     const clearOutput = useConsoleStore((s) => s.clearOutput);
     const dragging = useRef(false);
     const scrollRef = useRef<HTMLDivElement>(null);

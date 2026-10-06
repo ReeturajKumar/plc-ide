@@ -1,37 +1,32 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Breakpoint, CompileReport, FbSummary, IoMapping, ProgramSource, RuntimeState, StError } from "../types/runtime";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { CompileReport, FbSummary, IoMapping, ProgramSource } from "../types/runtime";
 import type { FileNode } from "../types/project";
+import type { Request, Response, RuntimeState as ProtocolState } from "../types/protocol";
 
-/** Typed wrappers over the Rust PLC simulator commands. Errors reject with an `StError`. */
-export const runtimeApi = {
-    /**
-     * Compile every program, check the I/O mappings and run all programs each scan, in
-     * order (or load them paused, for STEP). Rejects with a `CompileReport` on any error.
-     */
-    start: (programs: ProgramSource[], mappings: IoMapping[], paused = false, scanTimeMs?: number) =>
-        invoke<RuntimeState>("start_program", { programs, mappings, scanTimeMs, paused }),
+/**
+ * The Tauri transport for the PLC: protocol requests to the runtime, unchanged, plus the
+ * compiler queries. Only `services/runtimeApi` uses it; the rest of the UI talks to that.
+ */
+export const runtimeTransport = {
+    /** One protocol request for the runtime; resolves with its protocol response. */
+    request: (request: Request) => invoke<Response>("runtime_request", { request }),
     /** Compile without running: every program's errors and the I/O mapping errors. */
     compile: (programs: ProgramSource[], mappings: IoMapping[]) =>
         invoke<CompileReport>("compile_programs", { programs, mappings }),
-    /** Apply new I/O mappings to the loaded programs right away; returns the mapping errors. */
-    applyIoMappings: (mappings: IoMapping[]) => invoke<StError[]>("apply_io_mappings", { mappings }),
-    /** Set a simulated input: DI true/false, AI a number. Works whether or not the PLC runs. */
-    setIoInput: (address: string, value: boolean | number) => invoke<RuntimeState>("set_io_input", { address, value }),
     /** The standard function blocks (TON, CTU, …) with their inputs and outputs. */
     standardFunctionBlocks: () => invoke<FbSummary[]>("standard_function_blocks"),
-    /** Execute exactly one scan of every program; only while paused. */
-    step: () => invoke<RuntimeState>("step_program"),
-    /** Debugger: run the next statement while paused, then stop again. */
-    stepStatement: () => invoke<RuntimeState>("step_statement"),
-    /** Debugger: replace every breakpoint. */
-    setBreakpoints: (breakpoints: Breakpoint[]) => invoke<RuntimeState>("set_breakpoints", { breakpoints }),
-    stop: () => invoke<RuntimeState>("stop_program"),
-    pause: () => invoke<RuntimeState>("pause_program"),
-    resume: () => invoke<RuntimeState>("resume_program"),
-    getState: () => invoke<RuntimeState>("get_runtime_state"),
-    /** Set a BOOL variable declared by `program`. */
-    setInput: (program: string, name: string, value: boolean) =>
-        invoke<RuntimeState>("set_input", { program, name, value }),
+};
+
+/**
+ * What the runtime pushes without being asked: every PLC state change (the protocol
+ * state), and an unexpected end of the runtime (`{ code: "UNAVAILABLE", message }`).
+ */
+export const runtimeEvents = {
+    onState: (handler: (state: ProtocolState) => void): Promise<UnlistenFn> =>
+        listen<ProtocolState>("runtime://state-update", (event) => handler(event.payload)),
+    onUnavailable: (handler: (error: unknown) => void): Promise<UnlistenFn> =>
+        listen<unknown>("runtime://unavailable", (event) => handler(event.payload)),
 };
 
 /** Typed wrappers over the Rust filesystem commands. Errors are already friendly strings. */

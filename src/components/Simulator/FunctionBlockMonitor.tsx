@@ -1,8 +1,15 @@
-import type { FunctionBlockSnapshot } from "../../types/runtime";
+import type { FunctionBlock } from "../../types/protocol";
 import { formatValue, valueClass } from "./format";
 
+/** Every member of an instance with its role: inputs, outputs, then a project block's internals. */
+const members = (block: FunctionBlock) => [
+    ...block.inputs.map((m) => ({ ...m, role: "in" })),
+    ...block.outputs.map((m) => ({ ...m, role: "out" })),
+    ...block.internals.map((m) => ({ ...m, role: "var" })),
+];
+
 /** Function block instances, each with its inputs and read-only outputs. */
-const FunctionBlockMonitor = ({ blocks }: { blocks: FunctionBlockSnapshot[] }) => {
+const FunctionBlockMonitor = ({ blocks }: { blocks: FunctionBlock[] }) => {
     if (blocks.length === 0) return null;
     const showProgram = new Set(blocks.map((b) => b.program)).size > 1;
 
@@ -13,15 +20,14 @@ const FunctionBlockMonitor = ({ blocks }: { blocks: FunctionBlockSnapshot[] }) =
             </h3>
             <div className="grid gap-2 grid-cols-[repeat(auto-fill,minmax(220px,1fr))] max-w-4xl">
                 {blocks.map((block) => {
-                    const summary = block.members
-                        .filter((m) => m.isOutput)
+                    const summary = block.outputs
                         .map((m) => `${m.name}=${formatValue(m.dataType, m.value)}`)
                         .join(", ");
                     return (
-                        <div key={`${block.program}.${block.name}`} className="border border-[var(--theme-border)] rounded px-3 py-2">
+                        <div key={`${block.program}.${block.instance}`} className="border border-[var(--theme-border)] rounded px-3 py-2">
                             <div className="flex items-baseline gap-2">
-                                <span className="text-[var(--theme-text-primary)] font-semibold">{block.name}</span>
-                                <span className="text-[#4ec9b0]">{block.blockType}</span>
+                                <span className="text-[var(--theme-text-primary)] font-semibold">{block.instance}</span>
+                                <span className="text-[#4ec9b0]">{block.typeName}</span>
                                 {showProgram && (
                                     <span className="ml-auto text-[11px] text-[var(--theme-text-muted)]">{block.program}</span>
                                 )}
@@ -31,14 +37,14 @@ const FunctionBlockMonitor = ({ blocks }: { blocks: FunctionBlockSnapshot[] }) =
                             </div>
                             <table className="w-full mt-1.5 text-left">
                                 <tbody>
-                                    {block.members.map((m) => (
+                                    {members(block).map((m) => (
                                         <tr key={m.name} className="border-t border-[var(--theme-border)]">
                                             <td className="py-0.5 pr-3 text-[var(--theme-text-secondary)]">{m.name}</td>
                                             <td className={`py-0.5 pr-3 font-semibold tabular-nums ${valueClass(m.value)}`}>
                                                 {formatValue(m.dataType, m.value)}
                                             </td>
                                             <td className="py-0.5 text-right text-[10px] text-[var(--theme-text-muted)]">
-                                                {m.isInternal ? "var" : m.isOutput ? "out" : "in"}
+                                                {m.role}
                                             </td>
                                         </tr>
                                     ))}

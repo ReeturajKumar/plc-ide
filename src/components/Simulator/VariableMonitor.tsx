@@ -1,11 +1,14 @@
-import type { RuntimeStatus, VariableSnapshot } from "../../types/runtime";
+import type { RuntimeStatus, Variable } from "../../types/protocol";
 import { toggleInput } from "../../store/runActions";
 import { formatValue, valueClass } from "./format";
 
 interface VariableMonitorProps {
-    variables: VariableSnapshot[];
+    variables: Variable[];
     status: RuntimeStatus;
 }
+
+/** Never assigned by a program: its value comes from outside, so the user may drive it. */
+const isInput = (v: Variable) => !v.writtenByProgram;
 
 const VariableMonitor = ({ variables, status }: VariableMonitorProps) => {
     if (variables.length === 0) return null;
@@ -36,11 +39,11 @@ const VariableMonitor = ({ variables, status }: VariableMonitorProps) => {
                         <td className="py-1.5 pr-6 text-[#4ec9b0]">{v.dataType}</td>
                         <td className={`py-1.5 pr-6 font-semibold tabular-nums ${valueClass(v.value)}`}>{formatValue(v.dataType, v.value)}</td>
                         <td className="py-1.5">
-                            {v.io ? (
-                                <span className="text-[11px] text-sky-300" title={`Mapped to ${v.io}`}>
-                                    {v.io}
+                            {v.ioAddress ? (
+                                <span className="text-[11px] text-sky-300" title={`Mapped to ${v.ioAddress}`}>
+                                    {v.ioAddress}
                                 </span>
-                            ) : v.isInput && typeof v.value === "boolean" ? (
+                            ) : isInput(v) && typeof v.value === "boolean" ? (
                                 <button
                                     onClick={() => void toggleInput(v.program, v.name, v.value as boolean)}
                                     disabled={!canDrive}
@@ -56,7 +59,7 @@ const VariableMonitor = ({ variables, status }: VariableMonitorProps) => {
                                     {v.value ? "ON" : "OFF"}
                                 </button>
                             ) : (
-                                <span className="text-[11px] text-[var(--theme-text-muted)]">{v.isInput ? "input" : "output"}</span>
+                                <span className="text-[11px] text-[var(--theme-text-muted)]">{isInput(v) ? "input" : "output"}</span>
                             )}
                         </td>
                     </tr>

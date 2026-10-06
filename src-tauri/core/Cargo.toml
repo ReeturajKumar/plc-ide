@@ -1,0 +1,11 @@
+[package]
+name = "myplc-core"
+version = "0.1.0"
+description = "MyPLC compiler, I/O and PLC runtime: no UI, no Tauri"
+edition = "2021"
+
+[lib]
+name = "myplc_core"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

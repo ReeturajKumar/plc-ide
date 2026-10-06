@@ -1,0 +1,13 @@
+[package]
+name = "myplc-runtime"
+version = "0.1.0"
+description = "The MyPLC runtime on its own: loads a project and scans it, without the IDE"
+edition = "2021"
+
+[[bin]]
+name = "myplc-runtime"
+path = "src/main.rs"
+
+[dependencies]
+myplc-core = { path = "../core" }
+serde_json = "1"

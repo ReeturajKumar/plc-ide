@@ -2068,12 +2068,28 @@ dependencies = [
 name = "my-plc-ide"
 version = "0.1.0"
 dependencies = [
+ "myplc-core",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+]
+
+[[package]]
+name = "myplc-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "myplc-runtime"
+version = "0.1.0"
+dependencies = [
+ "myplc-core",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "npm run build:runtime && npm run build"
+  },
+  "bundle": {
+    "externalBin": ["binaries/myplc-runtime"]
+  }
+}

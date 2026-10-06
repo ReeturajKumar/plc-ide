@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { RuntimeState } from "../types/runtime";
+import type { RuntimeState } from "../types/protocol";
 import type { Problem } from "./consoleStore";
 
 export const STOPPED_STATE: RuntimeState = {
@@ -9,10 +9,9 @@ export const STOPPED_STATE: RuntimeState = {
     scanTimeMs: 100,
     variables: [],
     functionBlocks: [],
-    error: null,
-    errorProgram: null,
     io: [],
-    location: null,
+    debugger: { location: null, breakpoints: [] },
+    error: null,
 };
 
 interface SimulatorState {
