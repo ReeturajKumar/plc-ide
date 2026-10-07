@@ -9,6 +9,9 @@ lerna-debug.log*
 
 node_modules
 dist
+
+# Cargo build output (one target/ for the whole workspace)
+/target/
 dist-ssr
 *.local
 

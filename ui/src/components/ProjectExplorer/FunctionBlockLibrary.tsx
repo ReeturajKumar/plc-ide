@@ -7,7 +7,7 @@ import ContextMenu from "../common/ContextMenu";
 import { useProjectStore } from "../../store/projectStore";
 import { useUIStore } from "../../store/uiStore";
 import { refreshFileKinds } from "../../store/runActions";
-import { compilerApi } from "../../services/runtimeApi";
+import { compilerApi } from "../../services/compilerApi";
 import { insertFunctionBlock } from "../../utils/editorRef";
 import { FB_DRAG_TYPE } from "../../utils/fbInsert";
 import type { FbSummary } from "../../types/runtime";

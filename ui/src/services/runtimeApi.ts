@@ -1,6 +1,6 @@
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { runtimeEvents, runtimeTransport as transport } from "../utils/tauri";
-import type { CompileReport, FbSummary, IoMapping, ProgramSource, StError } from "../types/runtime";
+import type { CompileReport, IoMapping, ProgramSource, StError } from "../types/runtime";
 import type { Breakpoint, Command, ProtocolError, RuntimeState, ScanError } from "../types/protocol";
 
 /**
@@ -52,7 +52,8 @@ export function toRuntimeError(e: unknown): RuntimeApiError {
     return new RuntimeApiError("UNAVAILABLE", "The PLC runtime is not available.");
 }
 
-async function call<T>(request: () => Promise<T>): Promise<T> {
+/** Run a transport call; any failure becomes a `RuntimeApiError`. */
+export async function call<T>(request: () => Promise<T>): Promise<T> {
     try {
         return await request();
     } catch (e) {
@@ -107,14 +108,6 @@ export const runtimeApi = {
         }
     },
     getState: () => send({ command: "GET_STATE" }),
-};
-
-/** Compiler queries: nothing runs, no PLC state changes. */
-export const compilerApi = {
-    /** Every program's errors, breakable lines, declarations, and the I/O mapping errors. */
-    compile: (programs: ProgramSource[], mappings: IoMapping[]) => call(() => transport.compile(programs, mappings)),
-    /** The standard function blocks (TON, CTU, …) with their interfaces. */
-    standardFunctionBlocks: (): Promise<FbSummary[]> => call(transport.standardFunctionBlocks),
 };
 
 type OnState = (state: RuntimeState) => void;

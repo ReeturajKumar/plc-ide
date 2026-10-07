@@ -1,6 +1,6 @@
 /**
  * The MyPLC UI ↔ runtime protocol, transport independent. Mirrors the Rust module
- * `myplc_core::protocol` (src-tauri/core/src/protocol/mod.rs), which is the source of
+ * `myplc_core::protocol` (core/src/protocol/mod.rs), which is the source of
  * truth: change that first, then this file to match.
  *
  * This is how the IDE talks to the runtime: `runtimeApi` sends `Request`s through the

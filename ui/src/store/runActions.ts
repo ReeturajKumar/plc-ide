@@ -1,5 +1,6 @@
 import { fsApi } from "../utils/tauri";
-import { compilerApi, runtimeApi, runtimeState, toRuntimeError } from "../services/runtimeApi";
+import { runtimeApi, runtimeState, toRuntimeError } from "../services/runtimeApi";
+import { compilerApi } from "../services/compilerApi";
 import { baseName } from "../utils/project";
 import type { CompileReport, CompileResult, StError } from "../types/runtime";
 import type { RuntimeState } from "../types/protocol";
