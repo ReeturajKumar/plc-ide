@@ -1,19 +1,8 @@
-//! Tauri commands for the PLC. The runtime is reached through one transport command that
-//! carries protocol messages unchanged (`runtime_request`); the compiler queries are
-//! separate, since compiling runs nothing.
-
-use tauri::State;
+//! Compiler queries for the editor (diagnostics, the function block library). Nothing
+//! runs here: the PLC itself is the backend, reached over a WebSocket.
 
 use crate::compiler::project::{self, CompileReport, FbSummary, ProgramSource};
 use crate::io::Mapping;
-use crate::runtime_client::RuntimeClient;
-use myplc_core::protocol::{Request, Response};
-
-/// A protocol request for `myplc-runtime`, answered with its protocol response.
-#[tauri::command]
-pub fn runtime_request(runtime: State<'_, RuntimeClient>, request: Request) -> Response {
-    runtime.request(request)
-}
 
 /// The standard function blocks with their inputs and outputs (for the library panel).
 #[tauri::command]

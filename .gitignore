@@ -10,8 +10,11 @@ lerna-debug.log*
 node_modules
 dist
 
-# Cargo build output (one target/ for the whole workspace)
-/target/
+# Local settings (the backend URL and token)
+.env
+
+# Cargo build output (server/target, ui/src-tauri/target)
+target/
 dist-ssr
 *.local
 

@@ -1,32 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { CompileReport, FbSummary, IoMapping, ProgramSource } from "../types/runtime";
 import type { FileNode } from "../types/project";
-import type { Request, Response, RuntimeState as ProtocolState } from "../types/protocol";
 
-/**
- * The Tauri transport for the PLC: protocol requests to the runtime, unchanged, plus the
- * compiler queries. Only `services/runtimeApi` uses it; the rest of the UI talks to that.
- */
-export const runtimeTransport = {
-    /** One protocol request for the runtime; resolves with its protocol response. */
-    request: (request: Request) => invoke<Response>("runtime_request", { request }),
+/** The compiler queries, answered by the desktop app (nothing runs). */
+export const compilerTransport = {
     /** Compile without running: every program's errors and the I/O mapping errors. */
     compile: (programs: ProgramSource[], mappings: IoMapping[]) =>
         invoke<CompileReport>("compile_programs", { programs, mappings }),
     /** The standard function blocks (TON, CTU, …) with their inputs and outputs. */
     standardFunctionBlocks: () => invoke<FbSummary[]>("standard_function_blocks"),
-};
-
-/**
- * What the runtime pushes without being asked: every PLC state change (the protocol
- * state), and an unexpected end of the runtime (`{ code: "UNAVAILABLE", message }`).
- */
-export const runtimeEvents = {
-    onState: (handler: (state: ProtocolState) => void): Promise<UnlistenFn> =>
-        listen<ProtocolState>("runtime://state-update", (event) => handler(event.payload)),
-    onUnavailable: (handler: (error: unknown) => void): Promise<UnlistenFn> =>
-        listen<unknown>("runtime://unavailable", (event) => handler(event.payload)),
 };
 
 /** Typed wrappers over the Rust filesystem commands. Errors are already friendly strings. */

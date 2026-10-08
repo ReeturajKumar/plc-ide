@@ -1,12 +1,11 @@
-import type { UnlistenFn } from "@tauri-apps/api/event";
-import { runtimeEvents, runtimeTransport as transport } from "../utils/tauri";
+import { runtimeEvents, runtimeTransport as transport } from "../utils/runtimeSocket";
 import type { CompileReport, IoMapping, ProgramSource, StError } from "../types/runtime";
 import type { Breakpoint, Command, ProtocolError, RuntimeState, ScanError } from "../types/protocol";
 
 /**
  * The UI's only way to the PLC: user intents in, PLC state (or a `RuntimeApiError`) out.
  * Each intent is one or more protocol requests (`types/protocol.ts`); components and
- * stores never see the protocol or the transport (today one Tauri command and events).
+ * stores never see the protocol or the transport (a WebSocket to the PLC backend).
  */
 
 /** Why a request failed, whatever the transport: the protocol's error codes. */
@@ -116,7 +115,7 @@ type OnError = (error: RuntimeApiError) => void;
 /** Everyone watching, by their state callback (so watching twice is one watch). */
 const watchers = new Map<OnState, OnError>();
 /** The one shared subscription to the runtime's events, while anyone watches. */
-let listening: Promise<UnlistenFn[]> | null = null;
+let listening: Promise<(() => void)[]> | null = null;
 /** Counts state events, so a slower initial GET_STATE never overwrites a newer event. */
 let received = 0;
 

@@ -1,4 +1,4 @@
-import { runtimeTransport as transport } from "../utils/tauri";
+import { compilerTransport as transport } from "../utils/tauri";
 import { call } from "./runtimeApi";
 import type { FbSummary, IoMapping, ProgramSource } from "../types/runtime";
 

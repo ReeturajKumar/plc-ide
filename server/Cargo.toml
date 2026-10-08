@@ -1,0 +1,15 @@
+# The MyPLC server (backend): the PLC engine and the program that runs it 24×7.
+#   core/     myplc-core     compiler, PLC engine, I/O, protocol (a library)
+#   runtime/  myplc-runtime  the server program (depends on core)
+# `cargo run -- --listen 0.0.0.0:5020` from this folder starts the server.
+[workspace]
+members = ["core", "runtime"]
+default-members = ["runtime"]
+resolver = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

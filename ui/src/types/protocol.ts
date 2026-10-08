@@ -1,10 +1,10 @@
 /**
  * The MyPLC UI ↔ runtime protocol, transport independent. Mirrors the Rust module
- * `myplc_core::protocol` (core/src/protocol/mod.rs), which is the source of
+ * `myplc_core::protocol` (server/core/src/protocol/mod.rs), which is the source of
  * truth: change that first, then this file to match.
  *
- * This is how the IDE talks to the runtime: `runtimeApi` sends `Request`s through the
- * `runtime_request` Tauri command and receives `RuntimeState` in responses and events.
+ * This is how the IDE talks to the PLC backend: `runtimeApi` sends `Request`s over the
+ * WebSocket (`utils/runtimeSocket.ts`) and receives `RuntimeState` in responses and events.
  */
 import type { CompileReport, DataType, IoMapping, IoPoint, ProgramSource, StError } from "./runtime";
 

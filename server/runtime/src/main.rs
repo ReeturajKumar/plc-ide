@@ -1,12 +1,12 @@
 //! myplc-runtime: the PLC runtime on its own, without the IDE.
 //!
 //! ```text
+//! myplc-runtime --listen <address:port> [--token <secret>] [--data <folder>]
 //! myplc-runtime <project-dir> [--scan-ms N] [--scans N] [--trace] [--io simulated]
-//! myplc-runtime --serve
 //! ```
 //!
-//! With `--serve` it is a service for one client (the IDE) speaking the MyPLC protocol over
-//! stdin/stdout; see `serve`. Otherwise:
+//! With `--listen` it is the PLC server (the backend): it runs 24×7 and IDEs connect to it
+//! over a WebSocket; see `server`. Otherwise it runs one project from the command line:
 //!
 //! Reads `<project-dir>/project.json` (the IDE's project file: its programs in execution
 //! order and its I/O mappings), compiles the sources, loads the compiled project into the
@@ -32,13 +32,34 @@ use myplc_core::compiler::project::{CompileReport, ProgramSource};
 use myplc_core::compiler::value::Value;
 use myplc_core::io::{self, InputValue, IoKind, Mapping};
 use myplc_core::protocol::{self, ErrorCode, ProtocolError, RuntimeState};
-use myplc_core::ENGINE_STACK_BYTES;
 
 mod host;
-mod serve;
+mod server;
 
-const USAGE: &str = "usage: myplc-runtime <project-dir> [--scan-ms N] [--scans N] [--trace] [--io simulated]
-       myplc-runtime --serve";
+const USAGE: &str = "usage: myplc-runtime --listen <address:port> [--token <secret>] [--data <folder>]
+       myplc-runtime <project-dir> [--scan-ms N] [--scans N] [--trace] [--io simulated]";
+
+/// `--listen <addr> [--token <t>] [--data <dir>]`; the token may also come from MYPLC_TOKEN.
+fn server_config(mut args: impl Iterator<Item = String>) -> Result<server::ServerConfig, String> {
+    let mut config = server::ServerConfig {
+        listen: String::new(),
+        token: env::var("MYPLC_TOKEN").ok().filter(|t| !t.is_empty()),
+        data_dir: server::default_data_dir(),
+    };
+    while let Some(arg) = args.next() {
+        let mut value = |flag: &str| args.next().filter(|v| !v.is_empty()).ok_or(format!("{flag} needs a value"));
+        match arg.as_str() {
+            "--listen" => config.listen = value("--listen")?,
+            "--token" => config.token = Some(value("--token")?),
+            "--data" => config.data_dir = PathBuf::from(value("--data")?),
+            other => return Err(format!("unknown option {other}")),
+        }
+    }
+    if config.listen.is_empty() {
+        return Err("--listen needs an address, e.g. 0.0.0.0:5020".into());
+    }
+    Ok(config)
+}
 
 /// Where the I/O comes from. Only the simulated I/O exists for now.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -282,10 +303,14 @@ fn run(config: RuntimeConfig, programs: Vec<ProgramSource>, mappings: Vec<Mappin
 }
 
 fn main() -> ExitCode {
-    if env::args().nth(1).as_deref() == Some("--serve") {
-        // Commands like STEP run scans on the serving thread: give it the engine's stack.
-        let server = thread::Builder::new().name("plc-serve".into()).stack_size(ENGINE_STACK_BYTES).spawn(serve::serve);
-        return server.ok().and_then(|s| s.join().ok()).unwrap_or(ExitCode::FAILURE);
+    if env::args().any(|a| a == "--listen") {
+        return match server_config(env::args().skip(1)) {
+            Ok(config) => server::serve(config),
+            Err(e) => {
+                eprintln!("myplc-runtime: {e}\n{USAGE}");
+                ExitCode::from(2)
+            }
+        };
     }
     let config = match RuntimeConfig::from_args(env::args().skip(1)) {
         Ok(config) => config,
