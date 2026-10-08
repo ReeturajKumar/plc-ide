@@ -8,15 +8,16 @@
 //! - The loaded project and the RUN/STOP mode are saved in the data folder, so after a
 //!   restart (crash, reboot) the same project is loaded and, if it was running, runs again.
 //! - With a token (`--token` or `MYPLC_TOKEN`), clients must connect to `ws://<addr>/?token=…`.
+//! - Plain HTTP requests (hosting platforms' health checks) get `200 OK`, not a refusal.
 
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tungstenite::handshake::server::{ErrorResponse, Request as HttpRequest, Response as HttpResponse};
@@ -122,10 +123,64 @@ fn send(ws: &mut WebSocket<TcpStream>, message: &RuntimeMessage) -> Result<(), W
     ws.send(Message::text(serde_json::to_string(message).expect("protocol messages serialize")))
 }
 
+/// What a new connection wants, from its first bytes (left unread for the handshake).
+enum Visitor {
+    /// A WebSocket upgrade: an IDE.
+    WebSocket,
+    /// A plain HTTP request, e.g. a health check; `head` for a HEAD request.
+    Http { head: bool },
+    /// Nothing usable (a port scan, or a client that went away).
+    Nothing,
+}
+
+fn visitor(stream: &TcpStream) -> Visitor {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    if stream.set_read_timeout(Some(Duration::from_millis(200))).is_err() {
+        return Visitor::Nothing;
+    }
+    let mut buf = [0u8; 8192];
+    loop {
+        match stream.peek(&mut buf) {
+            Ok(0) => return Visitor::Nothing,
+            Ok(n) => {
+                let request = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                // The request line and headers are complete (or too long to matter).
+                if request.contains("\r\n\r\n") || n == buf.len() {
+                    let upgrade = request.lines().any(|line| line.starts_with("upgrade:") && line.contains("websocket"));
+                    return if upgrade { Visitor::WebSocket } else { Visitor::Http { head: request.starts_with("head ") } };
+                }
+            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(_) => return Visitor::Nothing,
+        }
+        if Instant::now() > deadline {
+            return Visitor::Nothing;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A health check: `200 OK`, then close.
+fn answer_http(mut stream: TcpStream, head: bool) {
+    let mut request = [0u8; 8192];
+    let _ = stream.read(&mut request); // consume it, so closing doesn't reset the connection
+    let body = if head { "" } else { "ok\n" };
+    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{body}");
+    let _ = stream.write_all(response.as_bytes());
+}
+
 /// One client: answer its requests and push it every state change, until it leaves.
 #[allow(clippy::result_large_err)] // the handshake callback's error type is tungstenite's
 fn serve_client(stream: TcpStream, host: &Host, saved: &Saved, token: Option<&str>) {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+    match visitor(&stream) {
+        Visitor::WebSocket => {}
+        Visitor::Http { head } => return answer_http(stream, head),
+        Visitor::Nothing => return,
+    }
+    if stream.set_read_timeout(None).is_err() {
+        return;
+    }
     let check = |request: &HttpRequest, response: HttpResponse| -> Result<HttpResponse, ErrorResponse> {
         match token {
             Some(expected) if token_of(request) != Some(expected) => {
