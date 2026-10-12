@@ -166,20 +166,20 @@ fn read_project(dir: &Path) -> Result<(Vec<ProgramSource>, Vec<Mapping>), String
     Ok((programs, mappings))
 }
 
-fn show(value: Value) -> String {
+fn show(value: &Value) -> String {
     match value {
-        Value::Bool(b) => if b { "TRUE" } else { "FALSE" }.to_string(),
-        Value::Int(n) => n.to_string(),
-        Value::DInt(n) => n.to_string(),
-        Value::Real(x) => x.to_string(),
         Value::Time(ms) => format!("T#{ms}ms"),
+        Value::String(_) | Value::Char(_) => format!("'{}'", value.to_text()),
+        Value::WString(_) | Value::WChar(_) => format!("\"{}\"", value.to_text()),
+        v if v.data_type().is_bit_string() => format!("16#{:X}", v.as_integer().unwrap_or_default()),
+        v => v.to_text(),
     }
 }
 
 /// One line: every variable, then every I/O point.
 fn trace_line(state: &RuntimeState) -> String {
-    let variables = state.variables.iter().map(|v| format!("{}.{}={}", v.program, v.name, show(v.value)));
-    let points = state.io.iter().map(|p| format!("{}={}", p.address, show(p.value)));
+    let variables = state.variables.iter().map(|v| format!("{}.{}={}", v.program, v.name, show(&v.value)));
+    let points = state.io.iter().map(|p| format!("{}={}", p.address, show(&p.value)));
     variables.chain(points).collect::<Vec<_>>().join(" ")
 }
 
@@ -187,14 +187,14 @@ fn print_state(state: &RuntimeState) {
     println!("[state] programs: {}  scans: {}", state.programs.join(" -> "), state.cycle_count);
     for v in &state.variables {
         let mapped = v.io_address.as_ref().map(|a| format!("  ({a})")).unwrap_or_default();
-        println!("  {}.{} : {} = {}{mapped}", v.program, v.name, v.data_type.name(), show(v.value));
+        println!("  {}.{} : {} = {}{mapped}", v.program, v.name, v.data_type.name(), show(&v.value));
     }
     for fb in &state.function_blocks {
         let members = fb.inputs.iter().chain(&fb.outputs).chain(&fb.internals);
-        let members: Vec<_> = members.map(|m| format!("{}={}", m.name, show(m.value))).collect();
+        let members: Vec<_> = members.map(|m| format!("{}={}", m.name, show(&m.value))).collect();
         println!("  {}.{} : {} [{}]", fb.program, fb.instance, fb.type_name, members.join(" "));
     }
-    let points: Vec<_> = state.io.iter().map(|p| format!("{}={}", p.address, show(p.value))).collect();
+    let points: Vec<_> = state.io.iter().map(|p| format!("{}={}", p.address, show(&p.value))).collect();
     println!("  I/O: {}", points.join(" "));
 }
 

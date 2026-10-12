@@ -5,7 +5,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 
-use super::ast::{DataType, VarType};
+use super::ast::{DataType, TypeDef, VarType};
 use super::function_blocks::FbKind;
 
 /// IEC identifiers are case-insensitive: `Motor`, `MOTOR` and `motor` are one symbol.
@@ -30,7 +30,12 @@ impl Symbol {
     pub fn data_type(&self) -> Option<DataType> {
         match self.var_type {
             VarType::Elementary(t) => Some(t),
-            VarType::FunctionBlock(_) | VarType::UserFb(_) => None,
+            VarType::FunctionBlock(_)
+            | VarType::UserFb(_)
+            | VarType::Array(_)
+            | VarType::Struct(_)
+            | VarType::Pointer(_)
+            | VarType::Reference(_) => None,
         }
     }
 
@@ -79,6 +84,26 @@ impl SymbolTable {
 
     pub fn iter(&self) -> impl Iterator<Item = &Symbol> {
         self.symbols.iter()
+    }
+}
+
+/// A type's name for messages; `fb_name` names function block types.
+pub fn type_name(var_type: VarType, types: &[TypeDef], fb_name: &dyn Fn(VarType) -> String) -> String {
+    match (var_type, var_type_def(var_type, types)) {
+        (VarType::Elementary(t), _) => t.name().to_string(),
+        (_, Some(TypeDef::Array { lower, upper, of })) => format!("ARRAY[{lower}..{upper}] OF {}", type_name(*of, types, fb_name)),
+        (_, Some(TypeDef::Struct { name, .. })) => name.clone(),
+        (_, Some(TypeDef::Pointer { to })) => format!("POINTER TO {}", type_name(*to, types, fb_name)),
+        (_, Some(TypeDef::Reference { to })) => format!("REFERENCE TO {}", type_name(*to, types, fb_name)),
+        (other, None) => fb_name(other),
+    }
+}
+
+/// The definition of an array or structure type.
+pub fn var_type_def(var_type: VarType, types: &[TypeDef]) -> Option<&TypeDef> {
+    match var_type {
+        VarType::Array(i) | VarType::Struct(i) | VarType::Pointer(i) | VarType::Reference(i) => types.get(i),
+        _ => None,
     }
 }
 
@@ -144,16 +169,18 @@ pub struct Scope<'a> {
     current: usize,
     /// The project's FUNCTION_BLOCK types, indexed by `VarType::UserFb`.
     fbs: &'a [FbInterface],
+    /// The project's array and structure types, indexed by `VarType::Array`/`Struct`.
+    types: &'a [TypeDef],
 }
 
 impl<'a> Scope<'a> {
     pub fn new(tables: &'a [SymbolTable], names: &'a [String], current: usize) -> Self {
-        Self { tables, names, current, fbs: &[] }
+        Self { tables, names, current, fbs: &[], types: &[] }
     }
 
     /// Sees nothing; for constant expressions such as initial values.
     pub fn empty() -> Self {
-        Self { tables: &[], names: &[], current: 0, fbs: &[] }
+        Self { tables: &[], names: &[], current: 0, fbs: &[], types: &[] }
     }
 
     /// Also know the project's FUNCTION_BLOCK types.
@@ -161,21 +188,27 @@ impl<'a> Scope<'a> {
         Self { fbs, ..self }
     }
 
+    /// Also know the project's array and structure types.
+    pub fn with_types(self, types: &'a [TypeDef]) -> Self {
+        Self { types, ..self }
+    }
+
+    pub fn types(&self) -> &'a [TypeDef] {
+        self.types
+    }
+
     /// The interface of a function block type (None for plain values).
     pub fn interface(&self, var_type: VarType) -> Option<FbInterface> {
         match var_type {
             VarType::FunctionBlock(kind) => Some(FbInterface::builtin(kind)),
             VarType::UserFb(index) => self.fbs.get(index).cloned(),
-            VarType::Elementary(_) => None,
+            VarType::Elementary(_) | VarType::Array(_) | VarType::Struct(_) | VarType::Pointer(_) | VarType::Reference(_) => None,
         }
     }
 
-    /// A type's name for messages: BOOL, TON, MotorControl, ….
+    /// A type's name for messages: BOOL, TON, MotorControl, ARRAY[1..3] OF INT, ….
     pub fn type_name(&self, var_type: VarType) -> String {
-        match var_type {
-            VarType::Elementary(t) => t.name().to_string(),
-            other => self.interface(other).map_or_else(|| "function block".to_string(), |i| i.name),
-        }
+        type_name(var_type, self.types, &|t| self.interface(t).map_or_else(|| "function block".to_string(), |i| i.name))
     }
 
     /// Programs other than the current one that declare `name`.

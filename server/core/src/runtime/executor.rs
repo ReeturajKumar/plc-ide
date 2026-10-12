@@ -5,12 +5,12 @@
 use std::collections::HashMap;
 
 use super::debugger::Trace;
-use crate::compiler::ast::{Expr, ExprKind, FunctionBlockDef, Stmt, UnaryOp, VarDecl, VarType};
+use crate::compiler::ast::{Expr, ExprKind, FunctionBlockDef, Stmt, TypeDef, UnaryOp, VarDecl, VarType};
 use crate::compiler::error::{ErrorKind, StError, StResult};
 use crate::runtime::function_blocks::{FbInstance, ScanClock};
 use crate::compiler::functions::StdFunction;
-use crate::compiler::symbols::{key, FbInterface, SymbolTable};
-use crate::compiler::value::Value;
+use crate::compiler::symbols::{key, var_type_def, FbInterface, SymbolTable};
+use crate::compiler::value::{Target, Value};
 
 /// Upper bound on loop iterations (FOR, WHILE, REPEAT combined) in one scan. A PLC scan
 /// must finish; past this the program stops with an error instead of freezing the IDE.
@@ -36,7 +36,7 @@ pub(super) fn slot(index: usize, name: &str) -> String {
 
 impl Memory {
     pub(super) fn value(&self, slots: &Slots, name: &str) -> Option<Value> {
-        self.values.get(slots.get(&key(name))?).copied()
+        self.values.get(slots.get(&key(name))?).cloned()
     }
 
     fn value_mut(&mut self, slots: &Slots, name: &str) -> Option<&mut Value> {
@@ -73,6 +73,74 @@ pub(super) struct UserFbs {
     pub(super) instances: HashMap<String, (usize, Slots)>,
     /// Each block's source file id (see `Runtime::files`).
     pub(super) file_ids: Vec<usize>,
+    /// The project's array and structure types, for creating values of them.
+    pub(super) types: Vec<TypeDef>,
+}
+
+/// A variable's value before the first scan: `init` (a constant, `[…]` or `(m := …)`)
+/// or its type's default; elements and members an initializer leaves out get theirs.
+pub(super) fn initial_value(var_type: VarType, init: Option<&Expr>, types: &[TypeDef]) -> StResult<Value> {
+    match (var_type_def(var_type, types), init.map(|e| &e.kind)) {
+        (Some(TypeDef::Array { lower, upper, of }), given) => {
+            let given: &[Expr] = match given {
+                Some(ExprKind::ArrayInit(items)) => items,
+                _ => &[],
+            };
+            (0..=upper - lower).map(|i| initial_value(*of, given.get(i as usize), types)).collect::<StResult<_>>().map(Value::Array)
+        }
+        (Some(TypeDef::Pointer { .. } | TypeDef::Reference { .. }), _) => Ok(Value::Pointer(None)),
+        (Some(TypeDef::Struct { fields, .. }), given) => {
+            let given: &[(String, Expr)] = match given {
+                Some(ExprKind::StructInit(fields)) => fields,
+                _ => &[],
+            };
+            fields
+                .iter()
+                .map(|f| {
+                    let init = given.iter().find(|(name, _)| *name == f.name).map(|(_, e)| e).or(f.init.as_ref());
+                    initial_value(f.var_type, init, types)
+                })
+                .collect::<StResult<_>>()
+                .map(Value::Struct)
+        }
+        // Initial values are constant expressions, so they need no memory.
+        (None, _) => match (var_type, init) {
+            (_, Some(init)) => eval(init, &Memory::default(), &Slots::new()),
+            (VarType::Elementary(t), None) => Ok(Value::default_for(t)),
+            _ => Err(StError::general("Internal error: a function block where a value was expected")),
+        },
+    }
+}
+
+/// Where `a[i].x` or `p^.x` is: a memory slot and the positions inside it, outermost
+/// first. Indexes are evaluated and checked against the array bounds here.
+fn place(expr: &Expr, memory: &Memory, slots: &Slots) -> StResult<Target> {
+    let at = |message: String| StError::new(ErrorKind::Runtime, expr.line, expr.column, message);
+    match &expr.kind {
+        ExprKind::Variable(name) => {
+            let slot = slots.get(&key(name)).ok_or_else(|| at(format!("Undeclared variable '{name}'")))?;
+            Ok(Target { slot: slot.clone(), path: Vec::new() })
+        }
+        ExprKind::Deref(pointer) => match eval(pointer, memory, slots)? {
+            Value::Pointer(Some(target)) => Ok(*target),
+            _ => Err(at("Null pointer: it doesn't point anywhere yet (set it with ADR, or bind the reference with REF=)".to_string())),
+        },
+        ExprKind::Index { base, index, lower, upper } => {
+            let mut target = place(base, memory, slots)?;
+            let i = eval(index, memory, slots)?.as_integer().ok_or_else(|| at("Array index must be an integer".to_string()))?;
+            if i < *lower || i > *upper {
+                return Err(at(format!("Array index {i} is out of bounds {lower}..{upper}")));
+            }
+            target.path.push((i - lower) as usize);
+            Ok(target)
+        }
+        ExprKind::Field { base, index, .. } => {
+            let mut target = place(base, memory, slots)?;
+            target.path.push(*index);
+            Ok(target)
+        }
+        _ => Err(at("Internal error: not a variable".to_string())),
+    }
 }
 
 /// What a statement runs in, for the debugger: its source file, the program whose scan
@@ -94,11 +162,8 @@ pub(super) fn instantiate(index: usize, prefix: &str, fbs: &mut UserFbs, memory:
         let member_slot = format!("{prefix}.{}", key(&member.name));
         slots.insert(key(&member.name), member_slot.clone());
         match member.var_type {
-            VarType::Elementary(data_type) => {
-                let value = match &member.init {
-                    Some(init) => eval(init, &Memory::default(), &Slots::new())?,
-                    None => Value::default_for(data_type),
-                };
+            VarType::Elementary(_) | VarType::Array(_) | VarType::Struct(_) | VarType::Pointer(_) | VarType::Reference(_) => {
+                let value = initial_value(member.var_type, member.init.as_ref(), &fbs.types)?;
                 memory.values.insert(member_slot, value);
             }
             VarType::FunctionBlock(kind) => {
@@ -196,10 +261,10 @@ impl Exec<'_, '_> {
             .ok_or_else(|| StError::new(ErrorKind::Runtime, expr.line, expr.column, "Condition must be BOOL"))
     }
 
-    fn integer(&self, expr: &Expr) -> StResult<i64> {
+    fn integer(&self, expr: &Expr) -> StResult<i128> {
         eval(expr, self.memory, self.slots)?
             .as_integer()
-            .ok_or_else(|| StError::new(ErrorKind::Runtime, expr.line, expr.column, "Expected an INT or DINT value"))
+            .ok_or_else(|| StError::new(ErrorKind::Runtime, expr.line, expr.column, "Expected an integer value"))
     }
 
     fn assign(&mut self, target: &str, value: Value, line: usize, column: usize) -> StResult<()> {
@@ -216,12 +281,19 @@ impl Exec<'_, '_> {
         self.trace.enter(&self.ctx, stmt.location())?;
         let edits = self.trace.edits;
         for (_, slot, value) in edits.iter().filter(|(at, _, _)| *at == self.trace.executed) {
-            self.memory.values.insert(slot.clone(), *value);
+            self.memory.values.insert(slot.clone(), value.clone());
         }
         match stmt {
             Stmt::Assign { target, value, line, column } => {
                 let result = eval(value, self.memory, self.slots)?;
                 self.assign(target, result, *line, *column)
+            }
+            Stmt::AssignPath { target, value, line, column } => {
+                let value = eval(value, self.memory, self.slots)?;
+                let Target { slot, path } = place(target, self.memory, self.slots)?;
+                let current = self.memory.values.get_mut(&slot).and_then(|v| v.at_mut(&path));
+                *current.ok_or_else(|| StError::new(ErrorKind::Runtime, *line, *column, "Invalid memory location"))? = value;
+                Ok(())
             }
             Stmt::If { branches, else_branch, .. } => {
                 for branch in branches {
@@ -327,7 +399,7 @@ impl Exec<'_, '_> {
                 result.map_err(|e| StError { message: format!("{} (in function block {})", e.message, def.name), ..e })
             }
             // The checker rejects these; reaching one means it was skipped.
-            Stmt::AssignMember { line, column, .. } => {
+            Stmt::AssignMember { line, column, .. } | Stmt::RefAssign { line, column, .. } => {
                 Err(StError::new(ErrorKind::Runtime, *line, *column, "Function block members can't be assigned"))
             }
         }
@@ -337,7 +409,7 @@ impl Exec<'_, '_> {
 pub(super) fn eval(expr: &Expr, memory: &Memory, slots: &Slots) -> StResult<Value> {
     let at = |message: String| StError::new(ErrorKind::Runtime, expr.line, expr.column, message);
     match &expr.kind {
-        ExprKind::Const(v) => Ok(*v),
+        ExprKind::Const(v) => Ok(v.clone()),
         ExprKind::Variable(name) => memory
             .value(slots, name)
             .ok_or_else(|| at(format!("Undeclared variable '{name}'"))),
@@ -347,9 +419,15 @@ pub(super) fn eval(expr: &Expr, memory: &Memory, slots: &Slots) -> StResult<Valu
             // A user block instance: its members are slots under the instance's slot.
             .or_else(|| {
                 let prefix = slots.get(&key(instance))?;
-                memory.values.get(&format!("{prefix}.{}", key(member))).copied()
+                memory.values.get(&format!("{prefix}.{}", key(member))).cloned()
             })
             .ok_or_else(|| at(format!("Unknown member '{instance}.{member}'"))),
+        ExprKind::Index { .. } | ExprKind::Field { .. } | ExprKind::Deref(_) => {
+            let Target { slot, path } = place(expr, memory, slots)?;
+            memory.values.get(&slot).and_then(|v| v.at(&path)).cloned().ok_or_else(|| at("Invalid memory location".to_string()))
+        }
+        ExprKind::Address(target) => Ok(Value::Pointer(Some(Box::new(place(target, memory, slots)?)))),
+        ExprKind::ArrayInit(_) | ExprKind::StructInit(_) => Err(at("Internal error: an initializer outside a declaration".to_string())),
         ExprKind::Convert { to, operand } => eval(operand, memory, slots)?.convert(*to).map_err(at),
         ExprKind::Call { name, args } => {
             let function = StdFunction::from_name(name).ok_or_else(|| at(format!("Unknown function '{name}'")))?;
@@ -360,7 +438,7 @@ pub(super) fn eval(expr: &Expr, memory: &Memory, slots: &Slots) -> StResult<Valu
         ExprKind::Unary { op: UnaryOp::Neg, operand } => eval(operand, memory, slots)?.negate().map_err(at),
         ExprKind::Binary { op, left, right } => {
             let (l, r) = (eval(left, memory, slots)?, eval(right, memory, slots)?);
-            Value::binary(*op, l, r).map_err(at)
+            Value::binary(*op, &l, &r).map_err(at)
         }
         // The checker replaces every numeric literal; reaching one means it was skipped.
         ExprKind::IntLiteral(_) | ExprKind::RealLiteral(_) => {

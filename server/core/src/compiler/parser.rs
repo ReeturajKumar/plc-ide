@@ -1,6 +1,6 @@
 use super::ast::{
-    BinaryOp, CallArg, CaseBranch, CaseLabel, Expr, ExprKind, FunctionBlockDef, IfBranch, Program, SourceFile, Stmt,
-    UnaryOp, VarDecl, VarType,
+    BinaryOp, DataType, CallArg, CaseBranch, CaseLabel, Expr, ExprKind, FunctionBlockDef, IfBranch, Layer, Program, SourceFile,
+    Stmt, TypeBody, TypeDecl, UnaryOp, VarDecl, VarType,
 };
 use super::error::{ErrorKind, StError, StResult};
 use super::function_blocks::FbKind;
@@ -12,30 +12,30 @@ use super::value::Value;
 /// tree. Hosts run them on threads sized for this limit (`crate::ENGINE_STACK_BYTES`).
 pub const MAX_NESTING: usize = 100;
 
-/// Parse a project source file: FUNCTION_BLOCKs and at most one PROGRAM, in any order.
+/// Limit on the elements of one variable (arrays, repeated initial values), so a typo like
+/// ARRAY[0..1000000000] is an error rather than gigabytes of memory.
+pub const MAX_ELEMENTS: i128 = 1_000_000;
+
+/// Parse a project source file: FUNCTION_BLOCKs, TYPEs and at most one PROGRAM, in any order.
 pub fn parse_file(source: &str) -> StResult<SourceFile> {
     let mut parser = Parser { tokens: tokenize(source), pos: 0, depth: 0 };
     let mut file = SourceFile::default();
     loop {
         match parser.peek().kind {
             TokenKind::FunctionBlock => file.function_blocks.push(parser.function_block()?),
+            TokenKind::TypeBlock => file.types.extend(parser.type_block()?),
             TokenKind::Program if file.program.is_some() => {
                 let token = parser.peek().clone();
                 return Err(parser.error_at(&token, "A file can contain only one PROGRAM; put the other one in its own file"));
             }
             TokenKind::Program => file.program = Some(parser.program()?),
-            TokenKind::Eof if file.program.is_some() || !file.function_blocks.is_empty() => return Ok(file),
-            _ => return Err(parser.error_expected("PROGRAM or FUNCTION_BLOCK")),
+            TokenKind::Eof if file.program.is_some() || !file.function_blocks.is_empty() || !file.types.is_empty() => {
+                return Ok(file)
+            }
+            _ => return Err(parser.error_expected("PROGRAM, FUNCTION_BLOCK or TYPE")),
         }
     }
 }
-
-/// IEC elementary type names this engine doesn't support yet. They are reserved, so they
-/// can't name a FUNCTION_BLOCK: say so right away instead of "unknown type".
-const UNSUPPORTED_TYPES: &[&str] = &[
-    "STRING", "WSTRING", "BYTE", "WORD", "DWORD", "LWORD", "SINT", "USINT", "UINT", "UDINT", "LINT", "ULINT", "LREAL",
-    "DATE", "TOD", "TIME_OF_DAY", "DT", "DATE_AND_TIME", "CHAR", "WCHAR", "ARRAY", "STRUCT", "POINTER", "REFERENCE",
-];
 
 struct Parser {
     tokens: Vec<Token>,
@@ -152,6 +152,42 @@ impl Parser {
     fn var_decl(&mut self) -> StResult<VarDecl> {
         let (name, line, column) = self.identifier("a variable name or END_VAR")?;
         self.expect(TokenKind::Colon, "':'")?;
+        let decl = self.typed_decl(name, line, column)?;
+        self.expect(TokenKind::Semicolon, "';'")?;
+        Ok(decl)
+    }
+
+    /// After `name :`, the type (any `ARRAY[…] OF`, `POINTER TO`, `REFERENCE TO` around a
+    /// type name) and the optional `:= initial value`.
+    fn typed_decl(&mut self, name: String, line: usize, column: usize) -> StResult<VarDecl> {
+        let mut layers = Vec::new();
+        loop {
+            match self.peek().kind {
+                TokenKind::Array => {
+                    self.advance();
+                    self.expect(TokenKind::LBracket, "'[' after ARRAY")?;
+                    loop {
+                        let lower = self.bound()?;
+                        self.expect(TokenKind::Dot, "'..' between the array bounds, e.g. ARRAY[1..10]")?;
+                        self.expect(TokenKind::Dot, "'..' between the array bounds, e.g. ARRAY[1..10]")?;
+                        let upper = self.bound()?;
+                        layers.push(Layer::Array(lower, upper));
+                        if !self.check(&TokenKind::Comma) {
+                            break;
+                        }
+                        self.advance();
+                    }
+                    self.expect(TokenKind::RBracket, "',' or ']'")?;
+                    self.expect(TokenKind::Of, "OF")?;
+                }
+                TokenKind::Pointer | TokenKind::Reference => {
+                    let reference = self.advance().kind == TokenKind::Reference;
+                    self.expect(TokenKind::To, "TO")?;
+                    layers.push(if reference { Layer::Reference } else { Layer::Pointer });
+                }
+                _ => break,
+            }
+        }
         let type_name = match &self.peek().kind {
             TokenKind::Identifier(name) => name.clone(),
             other => other.describe(),
@@ -163,31 +199,89 @@ impl Parser {
         } else {
             None
         };
-        self.expect(TokenKind::Semicolon, "';'")?;
-        Ok(VarDecl { name, var_type, type_name, init, line, column })
+        Ok(VarDecl { name, var_type, type_name, layers, init, line, column })
+    }
+
+    /// An array bound: an integer literal, optionally negative.
+    fn bound(&mut self) -> StResult<i128> {
+        let negative = self.check(&TokenKind::Minus);
+        if negative {
+            self.advance();
+        }
+        match self.peek().kind {
+            TokenKind::IntLiteral(n) => {
+                self.advance();
+                Ok(if negative { -n } else { n })
+            }
+            _ => Err(self.error_expected("an integer array bound")),
+        }
+    }
+
+    /// `TYPE Name : STRUCT … END_STRUCT; Other : ARRAY[1..4] OF INT; END_TYPE`
+    fn type_block(&mut self) -> StResult<Vec<TypeDecl>> {
+        self.advance(); // TYPE
+        let mut types = Vec::new();
+        while !self.check(&TokenKind::EndType) {
+            let (name, line, column) = self.identifier("a type name or END_TYPE")?;
+            self.expect(TokenKind::Colon, "':'")?;
+            let body = if self.check(&TokenKind::Struct) {
+                self.advance();
+                let mut fields = Vec::new();
+                while !self.check(&TokenKind::EndStruct) {
+                    fields.push(self.var_decl()?);
+                }
+                self.advance(); // END_STRUCT
+                self.optional_semicolon();
+                TypeBody::Struct(fields)
+            } else {
+                let alias = self.typed_decl(name.clone(), line, column)?;
+                self.expect(TokenKind::Semicolon, "';'")?;
+                TypeBody::Alias(alias)
+            };
+            types.push(TypeDecl { name, body, line, column });
+        }
+        self.advance(); // END_TYPE
+        self.optional_semicolon();
+        Ok(types)
     }
 
     fn var_type(&mut self) -> StResult<VarType> {
         let token = self.peek().clone();
         let var_type = match &token.kind {
+            TokenKind::Type(data_type) if data_type.is_text() => {
+                self.advance();
+                self.string_length()?;
+                return Ok(VarType::Elementary(*data_type));
+            }
             TokenKind::Type(data_type) => VarType::Elementary(*data_type),
             TokenKind::Identifier(name) => match FbKind::from_name(name) {
                 Some(kind) => VarType::FunctionBlock(kind),
-                None if UNSUPPORTED_TYPES.contains(&name.to_ascii_uppercase().as_str()) => {
-                    return Err(self.error_at(
-                        &token,
-                        format!(
-                            "Type '{name}' is not supported yet (supported: BOOL, INT, DINT, REAL, TIME, the standard function blocks and the project's FUNCTION_BLOCKs)"
-                        ),
-                    ))
-                }
-                // Maybe a FUNCTION_BLOCK of the project; the checker resolves it.
+                // Maybe a FUNCTION_BLOCK or TYPE of the project; the checker resolves it.
                 None => VarType::UNRESOLVED,
             },
             _ => return Err(self.error_expected("a data type")),
         };
         self.advance();
         Ok(var_type)
+    }
+
+    /// The optional maximum length after STRING/WSTRING: `STRING[20]` or `STRING(20)`.
+    // ponytail: accepted but not enforced, strings grow as needed; truncate on assignment
+    // if a program relies on the limit.
+    fn string_length(&mut self) -> StResult<()> {
+        let close = match self.peek().kind {
+            TokenKind::LBracket => TokenKind::RBracket,
+            TokenKind::LParen => TokenKind::RParen,
+            _ => return Ok(()),
+        };
+        self.advance();
+        match self.peek().kind {
+            TokenKind::IntLiteral(n) if n > 0 => self.advance(),
+            _ => return Err(self.error_expected("a string length, e.g. STRING[80]")),
+        };
+        let closer = close.describe();
+        self.expect(close, &closer)?;
+        Ok(())
     }
 
     // --- statements ---
@@ -229,7 +323,13 @@ impl Parser {
             TokenKind::Case => self.case_statement(),
             TokenKind::Identifier(_) => match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
                 Some(TokenKind::LParen) => self.call(),
-                Some(TokenKind::Dot) => self.member_assignment(),
+                Some(TokenKind::RefAssign) => {
+                    let (target, line, column) = self.identifier("a reference")?;
+                    self.advance(); // REF=
+                    let value = self.expression()?;
+                    self.expect(TokenKind::Semicolon, "';'")?;
+                    Ok(Stmt::RefAssign { target, value, line, column })
+                }
                 _ => self.assignment(),
             },
             _ => Err(self.error_expected("a statement")),
@@ -244,23 +344,63 @@ impl Parser {
         }
     }
 
+    /// `x := …;`, `Instance.Member := …;`, `a[i].x := …;`
     fn assignment(&mut self) -> StResult<Stmt> {
-        let (target, line, column) = self.identifier("a variable name")?;
+        let (name, line, column) = self.identifier("a variable name")?;
+        let target = self.postfix(Expr { kind: ExprKind::Variable(name), line, column })?;
         self.expect(TokenKind::Assign, "':='")?;
         let value = self.expression()?;
         self.expect(TokenKind::Semicolon, "';'")?;
-        Ok(Stmt::Assign { target, value, line, column })
+        Ok(match target.kind {
+            ExprKind::Variable(target) => Stmt::Assign { target, value, line, column },
+            ExprKind::Member { instance, member } => Stmt::AssignMember { instance, member, value, line, column },
+            _ => Stmt::AssignPath { target, value, line, column },
+        })
     }
 
-    /// `Instance.Member := expr;` — never valid, but parsed so the checker can say why.
-    fn member_assignment(&mut self) -> StResult<Stmt> {
-        let (instance, line, column) = self.identifier("a function block instance")?;
-        self.advance(); // .
-        let (member, _, _) = self.identifier("a member name")?;
-        self.expect(TokenKind::Assign, "':='")?;
-        let value = self.expression()?;
-        self.expect(TokenKind::Semicolon, "';'")?;
-        Ok(Stmt::AssignMember { instance, member, value, line, column })
+    /// `[i, j]`, `^` and `.name` after a variable, any number of times. `Name.Member` stays a
+    /// `Member` (a function block's member or a structure's field; the checker knows which).
+    fn postfix(&mut self, mut expr: Expr) -> StResult<Expr> {
+        let mut steps = 0;
+        loop {
+            if self.check(&TokenKind::LBracket) {
+                self.advance();
+                loop {
+                    self.enter()?;
+                    steps += 1;
+                    let index = self.expression()?;
+                    let (line, column) = (expr.line, expr.column);
+                    let kind = ExprKind::Index { base: Box::new(expr), index: Box::new(index), lower: 0, upper: 0 };
+                    expr = Expr { kind, line, column };
+                    if !self.check(&TokenKind::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(TokenKind::RBracket, "',' or ']'")?;
+            } else if self.check(&TokenKind::Caret) {
+                self.advance();
+                self.enter()?;
+                steps += 1;
+                let (line, column) = (expr.line, expr.column);
+                expr = Expr { kind: ExprKind::Deref(Box::new(expr)), line, column };
+            } else if self.check(&TokenKind::Dot) {
+                self.advance();
+                self.enter()?;
+                steps += 1;
+                let (field, _, _) = self.identifier("a member name")?;
+                let (line, column) = (expr.line, expr.column);
+                let kind = match expr.kind {
+                    ExprKind::Variable(instance) => ExprKind::Member { instance, member: field },
+                    _ => ExprKind::Field { base: Box::new(expr), field, index: usize::MAX },
+                };
+                expr = Expr { kind, line, column };
+            } else {
+                break;
+            }
+        }
+        self.depth -= steps;
+        Ok(expr)
     }
 
     /// `Instance(Name := expr, …);`
@@ -537,20 +677,72 @@ impl Parser {
             TokenKind::IntLiteral(n) => ExprKind::IntLiteral(n),
             TokenKind::RealLiteral(x) => ExprKind::RealLiteral(x),
             TokenKind::TimeLiteral(ms) => ExprKind::Const(Value::Time(ms)),
+            TokenKind::StringLiteral(data_type, ref text) => ExprKind::Const(Value::text(text.clone(), data_type)),
+            TokenKind::DateLiteral(date_type, ms) => ExprKind::Const(Value::integer(ms.into(), date_type).map_err(|m| self.error_at(&token, m))?),
+            TokenKind::Type(data_type) if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Hash)) => {
+                self.advance(); // type
+                self.advance(); // #
+                let value = self.typed_literal(data_type, &token)?;
+                return Ok(Expr { kind: ExprKind::Const(value), line: token.line, column: token.column });
+            }
             TokenKind::Identifier(name) => {
                 self.advance();
-                let kind = if self.check(&TokenKind::LParen) {
+                let at = |kind| Expr { kind, line: token.line, column: token.column };
+                if self.check(&TokenKind::LParen) {
                     // Which names are functions is the checker's business; any `name(…)`
                     // in an expression is a call.
-                    ExprKind::Call { name, args: self.call_arguments()? }
-                } else if self.check(&TokenKind::Dot) {
-                    self.advance(); // .
-                    let (member, _, _) = self.identifier("a member name, e.g. Q")?;
-                    ExprKind::Member { instance: name, member }
-                } else {
-                    ExprKind::Variable(name)
-                };
-                return Ok(Expr { kind, line: token.line, column: token.column });
+                    return Ok(at(ExprKind::Call { name, args: self.call_arguments()? }));
+                }
+                return self.postfix(at(ExprKind::Variable(name)));
+            }
+            // `[1, 2, 3(0)]`: an array's initial value.
+            TokenKind::LBracket => {
+                self.advance();
+                let mut items = Vec::new();
+                while !self.check(&TokenKind::RBracket) {
+                    let repeat = match (&self.peek().kind, self.tokens.get(self.pos + 1).map(|t| &t.kind)) {
+                        (TokenKind::IntLiteral(n), Some(TokenKind::LParen)) => Some(*n),
+                        _ => None,
+                    };
+                    match repeat {
+                        Some(n) => {
+                            let count = self.advance();
+                            self.advance(); // (
+                            let item = self.expression()?;
+                            self.expect(TokenKind::RParen, "')'")?;
+                            if !(0..=MAX_ELEMENTS).contains(&n) {
+                                return Err(self.error_at(&count, format!("Repeat count {n} is too large")));
+                            }
+                            items.extend(std::iter::repeat_n(item, n as usize));
+                        }
+                        None => items.push(self.expression()?),
+                    }
+                    if !self.check(&TokenKind::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(TokenKind::RBracket, "',' or ']'")?;
+                return Ok(Expr { kind: ExprKind::ArrayInit(items), line: token.line, column: token.column });
+            }
+            // `(x := 1.0, y := 2.0)`: a structure's initial value.
+            TokenKind::LParen
+                if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Identifier(_)))
+                    && matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Assign)) =>
+            {
+                self.advance();
+                let mut fields = Vec::new();
+                loop {
+                    let (name, _, _) = self.identifier("a member name")?;
+                    self.expect(TokenKind::Assign, "':='")?;
+                    fields.push((name, self.expression()?));
+                    if !self.check(&TokenKind::Comma) {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(TokenKind::RParen, "',' or ')'")?;
+                return Ok(Expr { kind: ExprKind::StructInit(fields), line: token.line, column: token.column });
             }
             TokenKind::LParen => {
                 self.advance();
@@ -562,6 +754,34 @@ impl Parser {
         };
         self.advance();
         Ok(Expr { kind, line: token.line, column: token.column })
+    }
+
+    /// The value of `TYPE#value` (after the `#`), e.g. `UINT#7`, `WORD#16#FF`, `LREAL#-1.5`.
+    fn typed_literal(&mut self, data_type: DataType, start: &Token) -> StResult<Value> {
+        let negative = self.check(&TokenKind::Minus);
+        if negative {
+            self.advance();
+        }
+        let sign: i128 = if negative { -1 } else { 1 };
+        let value = match self.peek().kind {
+            TokenKind::IntLiteral(n) if data_type.is_real() => Ok(Value::real((sign * n) as f64, data_type)),
+            TokenKind::IntLiteral(n) if data_type.is_integer() || data_type.is_bit_string() => {
+                Value::integer(sign * n, data_type).map_err(|_| format!("Value {} is out of range for {}", sign * n, data_type.name()))
+            }
+            TokenKind::RealLiteral(x) if data_type.is_real() => Ok(Value::real(if negative { -x } else { x }, data_type)),
+            // `CHAR#'A'`, `WCHAR#"Ω"`: exactly one character.
+            TokenKind::StringLiteral(_, ref text) if matches!(data_type, DataType::Char | DataType::WChar) && !negative => {
+                let mut chars = text.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(c), None) => Value::integer(u32::from(c).into(), data_type)
+                        .map_err(|_| format!("'{c}' is not a {} character", data_type.name())),
+                    _ => Err(format!("A {} literal holds exactly one character", data_type.name())),
+                }
+            }
+            _ => return Err(self.error_expected(&format!("a {} value after '{}#'", data_type.name(), data_type.name()))),
+        };
+        self.advance();
+        value.map_err(|message| StError::new(ErrorKind::TypeMismatch, start.line, start.column, message))
     }
 
     /// `( expr, expr, … )` — positional function arguments, possibly none.

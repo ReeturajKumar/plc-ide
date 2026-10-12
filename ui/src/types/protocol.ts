@@ -72,7 +72,7 @@ export interface Variable {
     program: string;
     name: string;
     dataType: DataType;
-    value: boolean | number;
+    value: boolean | number | string;
     /** Some program assigns it; otherwise its value only changes from outside. */
     writtenByProgram: boolean;
     ioAddress: string | null;
@@ -91,7 +91,7 @@ export interface FunctionBlock {
 export interface Member {
     name: string;
     dataType: DataType;
-    value: boolean | number;
+    value: boolean | number | string;
 }
 
 export interface DebuggerState {

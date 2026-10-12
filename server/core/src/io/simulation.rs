@@ -44,8 +44,8 @@ impl IoProvider for IoImage {
     }
 
     fn read_analog_input(&self, index: usize) -> f64 {
-        match self.point(IoKind::AnalogInput, index).map(|p| p.value) {
-            Some(Value::Real(x)) => x,
+        match self.point(IoKind::AnalogInput, index).map(|p| &p.value) {
+            Some(Value::Real(x)) => *x,
             _ => 0.0,
         }
     }

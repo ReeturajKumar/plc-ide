@@ -32,7 +32,14 @@ export interface StError {
     message: string;
 }
 
-export type DataType = "BOOL" | "INT" | "DINT" | "REAL" | "TIME";
+export type DataType =
+    | "BOOL"
+    | "SINT" | "INT" | "DINT" | "LINT"
+    | "USINT" | "UINT" | "UDINT" | "ULINT"
+    | "REAL" | "LREAL"
+    | "BYTE" | "WORD" | "DWORD" | "LWORD"
+    | "TIME" | "DATE" | "TOD" | "DT"
+    | "CHAR" | "WCHAR" | "STRING" | "WSTRING";
 
 export type IoKind = "DigitalInput" | "DigitalOutput" | "AnalogInput" | "AnalogOutput";
 

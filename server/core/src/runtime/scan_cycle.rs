@@ -73,7 +73,7 @@ impl Runtime {
             }
         }
         for (io_slot, target) in &self.inputs {
-            let Some(&value) = self.memory.values.get(io_slot) else { continue };
+            let Some(value) = self.memory.values.get(io_slot).cloned() else { continue };
             match target {
                 Target::Slot(slot) => {
                     self.memory.values.insert(slot.clone(), value);
@@ -92,7 +92,7 @@ impl Runtime {
     fn write_outputs(&mut self, io: &mut dyn IoProvider) {
         for (source, io_slot) in &self.outputs {
             let value = match source {
-                Target::Slot(slot) => self.memory.values.get(slot).copied(),
+                Target::Slot(slot) => self.memory.values.get(slot).cloned(),
                 Target::Builtin { instance, member } => self.memory.instances.get(instance).and_then(|fb| fb.get(member)),
             };
             if let Some(value) = value {

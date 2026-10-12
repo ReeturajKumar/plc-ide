@@ -4,8 +4,8 @@
 use super::debugger::Location;
 use super::executor::slot;
 use super::Runtime;
-use crate::compiler::ast::{DataType, VarType};
-use crate::compiler::symbols::key;
+use crate::compiler::ast::{DataType, TypeDef, VarType};
+use crate::compiler::symbols::{key, var_type_def};
 use crate::compiler::value::Value;
 
 /// A program variable.
@@ -59,6 +59,25 @@ pub struct EngineState {
     pub breakpoints: Vec<(String, usize)>,
 }
 
+/// Every elementary value inside `value` (of type `var_type`), with its name in ST.
+fn leaves(name: String, var_type: VarType, value: &Value, types: &[TypeDef], out: &mut dyn FnMut(String, &Value)) {
+    match (var_type_def(var_type, types), value) {
+        (Some(TypeDef::Array { lower, of, .. }), Value::Array(items)) => {
+            for (i, item) in items.iter().enumerate() {
+                leaves(format!("{name}[{}]", lower + i as i128), *of, item, types, out);
+            }
+        }
+        (Some(TypeDef::Struct { fields, .. }), Value::Struct(items)) => {
+            for (field, item) in fields.iter().zip(items) {
+                leaves(format!("{name}.{}", field.name), field.var_type, item, types, out);
+            }
+        }
+        // ponytail: pointers aren't shown; show "→ main.X" here if debugging them needs it.
+        (_, Value::Pointer(_)) => {}
+        _ => out(name, value),
+    }
+}
+
 impl Runtime {
     pub fn state(&self) -> EngineState {
         EngineState {
@@ -76,13 +95,27 @@ impl Runtime {
         let mut out = Vec::new();
         for (i, unit) in self.units.iter().enumerate() {
             for symbol in unit.symbols.iter() {
-                let Some(data_type) = symbol.data_type() else { continue };
                 let slot = slot(i, &symbol.name);
+                // An array or structure: one entry per element, e.g. `Levels[1]`, `Pos.x`.
+                if let (VarType::Array(_) | VarType::Struct(_), Some(value)) = (symbol.var_type, self.memory.values.get(&slot)) {
+                    leaves(symbol.name.clone(), symbol.var_type, value, &self.fbs.types, &mut |name, value| {
+                        out.push(VariableState {
+                            program: unit.name.clone(),
+                            name,
+                            data_type: value.data_type(),
+                            value: value.clone(),
+                            written_by_program: symbol.is_written(),
+                            io_address: None,
+                        })
+                    });
+                    continue;
+                }
+                let Some(data_type) = symbol.data_type() else { continue };
                 out.push(VariableState {
                     program: unit.name.clone(),
                     name: symbol.name.clone(),
                     data_type,
-                    value: self.memory.values.get(&slot).copied().unwrap_or(Value::default_for(data_type)),
+                    value: self.memory.values.get(&slot).cloned().unwrap_or(Value::default_for(data_type)),
                     written_by_program: symbol.is_written(),
                     io_address: self.mapped.get(&slot).cloned(),
                 });
@@ -120,7 +153,7 @@ impl Runtime {
                             internals: Vec::new(),
                         }
                     }
-                    VarType::Elementary(_) => continue,
+                    VarType::Elementary(_) | VarType::Array(_) | VarType::Struct(_) | VarType::Pointer(_) | VarType::Reference(_) => continue,
                 };
                 out.push(FunctionBlockState { program: unit.name.clone(), instance: symbol.name.clone(), ..state });
             }
@@ -134,7 +167,7 @@ impl Runtime {
         let member = |name: &str, data_type: DataType| MemberState {
             name: name.to_string(),
             data_type,
-            value: self.memory.values.get(&format!("{prefix}.{}", key(name))).copied().unwrap_or(Value::default_for(data_type)),
+            value: self.memory.values.get(&format!("{prefix}.{}", key(name))).cloned().unwrap_or(Value::default_for(data_type)),
         };
         FunctionBlockState {
             program: String::new(),

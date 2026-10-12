@@ -23,14 +23,14 @@ pub use scan_cycle::ScanOutcome;
 pub use state::{EngineState, FunctionBlockState, MemberState, VariableState};
 
 use debugger::DebuggerState;
-use executor::{eval, instantiate, slot, Memory, Slots, Unit, UserFbs};
+use executor::{initial_value, instantiate, slot, Memory, Slots, Unit, UserFbs};
 use scan_cycle::ScanCycle;
 
 use crate::io::{IoConfig, MappingTarget, ResolvedMapping};
-use crate::compiler::ast::VarType;
+use crate::compiler::ast::{TypeDef, VarType};
 use crate::compiler::error::{StError, StErrors, StResult};
 use crate::compiler::project::CompiledProject;
-use crate::compiler::symbols::{key, Scope, SymbolTable};
+use crate::compiler::symbols::{key, var_type_def, Scope, SymbolTable};
 use crate::compiler::value::Value;
 
 /// A loaded, compiled project and its memory. Executes one scan at a time, running every
@@ -81,26 +81,21 @@ impl Runtime {
                 })
             })
             .collect();
-        let mut fbs = UserFbs { defs, interfaces: context.interfaces.clone(), instances: HashMap::new(), file_ids };
+        let mut fbs =
+            UserFbs { defs, interfaces: context.interfaces.clone(), instances: HashMap::new(), file_ids, types: context.types.clone() };
 
         let mut initial = Memory::default();
         let mut errors = vec![StErrors::new(); programs.len()];
         for (i, compiled) in programs.iter().enumerate() {
             for decl in &compiled.program.vars {
                 match decl.var_type {
-                    VarType::Elementary(data_type) => {
-                        let value = match &decl.init {
-                            // Initial values are constant expressions, so they need no memory.
-                            Some(init) => match eval(init, &Memory::default(), &Slots::new()) {
-                                Ok(value) => value,
-                                Err(e) => {
-                                    errors[i].push(e);
-                                    continue;
-                                }
-                            },
-                            None => Value::default_for(data_type),
-                        };
-                        initial.values.insert(slot(i, &decl.name), value);
+                    VarType::Elementary(_) | VarType::Array(_) | VarType::Struct(_) | VarType::Pointer(_) | VarType::Reference(_) => {
+                        match initial_value(decl.var_type, decl.init.as_ref(), &fbs.types) {
+                            Ok(value) => {
+                                initial.values.insert(slot(i, &decl.name), value);
+                            }
+                            Err(e) => errors[i].push(e),
+                        }
                     }
                     VarType::FunctionBlock(kind) => {
                         initial.instances.insert(slot(i, &decl.name), kind.instantiate());
@@ -208,19 +203,19 @@ impl Runtime {
         self.reset_cycle();
     }
 
-    /// Write a variable that `program` declares, from outside. The value must match its type.
+    /// Write a variable that `program` declares, from outside; also an element, named as
+    /// the monitor shows it (`Flags[2]`, `Pos.x`). The value must match its type.
     pub fn set_in(&mut self, program: &str, name: &str, value: Value) -> StResult<()> {
         let unit = self
             .units
             .iter()
             .position(|u| u.name == program)
             .ok_or_else(|| StError::general(format!("Unknown program '{program}'.")))?;
-        let var_slot = slot(unit, name);
-        let current = self
-            .memory
-            .values
-            .get_mut(&var_slot)
-            .ok_or_else(|| StError::general(format!("Unknown variable '{name}'.")))?;
+        let unknown = || StError::general(format!("Unknown variable '{name}'."));
+        let (root, positions) = self.element(unit, name).ok_or_else(unknown)?;
+        let var_slot = slot(unit, root);
+        let current =
+            self.memory.values.get_mut(&var_slot).and_then(|v| v.at_mut(&positions)).ok_or_else(unknown)?;
         if current.data_type() != value.data_type() {
             return Err(StError::general(format!(
                 "Type mismatch: '{name}' is {}, cannot set it to a {} value.",
@@ -229,8 +224,37 @@ impl Runtime {
             )));
         }
         *current = value;
-        self.record_edit(var_slot, value);
+        let whole = self.memory.values.get(&var_slot).cloned().ok_or_else(unknown)?;
+        self.record_edit(var_slot, whole);
         Ok(())
+    }
+
+    /// `Tanks[2].Pos.x` → the variable (`Tanks`) and the positions inside it.
+    fn element<'n>(&self, unit: usize, name: &'n str) -> Option<(&'n str, Vec<usize>)> {
+        let split = name.find(['[', '.']).unwrap_or(name.len());
+        let (root, mut rest) = name.split_at(split);
+        let mut var_type = self.units[unit].symbols.get(root)?.var_type;
+        let mut positions = Vec::new();
+        while !rest.is_empty() {
+            let (position, of, tail) = match var_type_def(var_type, &self.fbs.types)? {
+                TypeDef::Array { lower, upper, of } => {
+                    let (index, tail) = rest.strip_prefix('[')?.split_once(']')?;
+                    let index: i128 = index.trim().parse().ok().filter(|i| (*lower..=*upper).contains(i))?;
+                    ((index - lower) as usize, *of, tail)
+                }
+                TypeDef::Struct { fields, .. } => {
+                    let after = rest.strip_prefix('.')?;
+                    let end = after.find(['[', '.']).unwrap_or(after.len());
+                    let position = fields.iter().position(|f| f.name.eq_ignore_ascii_case(&after[..end]))?;
+                    (position, fields[position].var_type, &after[end..])
+                }
+                TypeDef::Pointer { .. } | TypeDef::Reference { .. } => return None,
+            };
+            positions.push(position);
+            var_type = of;
+            rest = tail;
+        }
+        Some((root, positions))
     }
 }
 

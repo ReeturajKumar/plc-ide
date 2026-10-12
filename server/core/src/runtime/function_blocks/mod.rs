@@ -66,7 +66,7 @@ impl Io {
     }
 
     pub fn get(&self, name: &str) -> Option<Value> {
-        self.index(name).map(|i| self.values[i])
+        self.index(name).map(|i| self.values[i].clone())
     }
 
     /// Write a member, keeping its declared type.
@@ -87,7 +87,7 @@ impl Io {
     // Typed access for the block implementations, whose member names and types are fixed
     // by their own interface (and covered by their tests).
     fn bool(&self, name: &str) -> bool {
-        self.get(name).and_then(Value::as_bool).unwrap_or(false)
+        self.get(name).and_then(|v| v.as_bool()).unwrap_or(false)
     }
 
     fn time(&self, name: &str) -> i64 {

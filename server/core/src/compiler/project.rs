@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::ast::{statement_lines, DataType, FunctionBlockDef, Program, VarDecl, VarType};
+use super::ast::{statement_lines, DataType, FunctionBlockDef, Layer, Program, TypeDecl, TypeDef, VarDecl, VarType};
 use super::checker::{check_project, Checked, CheckedFb, ProjectCheck};
 use super::error::{StError, StErrors};
 use super::function_blocks::{reference_source, FbKind};
@@ -63,6 +63,21 @@ impl FbSummary {
         };
         Self { name: fb.name.clone(), inputs: vars(&fb.inputs), outputs: vars(&fb.outputs), line: fb.line, source: None }
     }
+}
+
+/// A declaration's type as written: `INT`, `TON`, `MotorControl`, `ARRAY[1..3] OF REAL`,
+/// `POINTER TO INT`.
+fn written_type(decl: &VarDecl) -> String {
+    let element = match decl.var_type {
+        VarType::Elementary(t) => t.name().to_string(),
+        VarType::FunctionBlock(kind) => kind.name().to_string(),
+        _ => decl.type_name.clone(),
+    };
+    decl.layers.iter().rev().fold(element, |inner, layer| match layer {
+        Layer::Array(lower, upper) => format!("ARRAY[{lower}..{upper}] OF {inner}"),
+        Layer::Pointer => format!("POINTER TO {inner}"),
+        Layer::Reference => format!("REFERENCE TO {inner}"),
+    })
 }
 
 /// The standard function blocks (TON, TOF, TP, CTU, CTD, R_TRIG, F_TRIG) with their inputs
@@ -129,13 +144,15 @@ pub struct ProjectContext {
     pub names: Vec<String>,
     /// The project's FUNCTION_BLOCK types, indexed by `VarType::UserFb`.
     pub interfaces: Vec<FbInterface>,
+    /// The project's array and structure types, indexed by `VarType::Array`/`Struct`.
+    pub types: Vec<TypeDef>,
 }
 
 impl ProjectContext {
     /// Check `mappings` and resolve them to what the runtime reads and writes.
     pub fn resolve_mappings(&self, mappings: &[Mapping]) -> Result<Vec<ResolvedMapping>, StErrors> {
         let io = self.tables.len() - 1;
-        let scope = Scope::new(&self.tables, &self.names, io).with_fbs(&self.interfaces);
+        let scope = Scope::new(&self.tables, &self.names, io).with_fbs(&self.interfaces).with_types(&self.types);
         let errors = mapping::validate(mappings, &self.config, &scope, &self.tables[io]);
         if errors.is_empty() {
             Ok(mapping::resolve_all(mappings, &self.config, &scope))
@@ -162,6 +179,8 @@ pub struct CompiledProject {
 pub struct ProjectErrors {
     pub programs: Vec<StErrors>,
     pub function_blocks: Vec<StErrors>,
+    /// Each TYPE declaration's.
+    pub types: Vec<StErrors>,
     pub mapping: StErrors,
 }
 
@@ -170,19 +189,24 @@ pub struct ProjectErrors {
 pub fn compile_project(
     programs: Vec<(String, Program)>,
     fbs: Vec<FunctionBlockDef>,
+    type_decls: &[TypeDecl],
     mappings: &[Mapping],
     config: &IoConfig,
 ) -> Result<CompiledProject, ProjectErrors> {
     let mapped_inputs = mapping::mapped_block_inputs(mappings, config);
-    let ProjectCheck { programs: results, function_blocks, interfaces, tables, names } =
-        check_project(programs, fbs, &config.symbols(), &mapped_inputs);
-    let context = ProjectContext { config: *config, tables, names, interfaces };
+    let ProjectCheck { programs: results, function_blocks, type_errors, types, interfaces, tables, names } =
+        check_project(programs, fbs, type_decls, &config.symbols(), &mapped_inputs);
+    let context = ProjectContext { config: *config, tables, names, interfaces, types };
     let resolved = context.resolve_mappings(mappings);
-    let failed = results.iter().any(Result::is_err) || function_blocks.iter().any(Result::is_err) || resolved.is_err();
+    let failed = results.iter().any(Result::is_err)
+        || function_blocks.iter().any(Result::is_err)
+        || type_errors.iter().any(|e| !e.is_empty())
+        || resolved.is_err();
     if failed {
         return Err(ProjectErrors {
             programs: results.into_iter().map(|r| r.err().unwrap_or_default()).collect(),
             function_blocks: function_blocks.into_iter().map(|r| r.err().unwrap_or_default()).collect(),
+            types: type_errors,
             mapping: resolved.err().unwrap_or_default(),
         });
     }
@@ -209,8 +233,9 @@ pub fn compile_sources(sources: &[ProgramSource], mappings: &[Mapping], config: 
     let mut has_program = vec![false; n];
     let mut parsed = Vec::new();
     let mut index = Vec::new();
-    // Every file's FUNCTION_BLOCKs, and the file each came from.
+    // Every file's FUNCTION_BLOCKs and TYPEs, and the file each came from.
     let (mut fbs, mut fb_file) = (Vec::new(), Vec::new());
+    let (mut type_decls, mut type_file) = (Vec::new(), Vec::new());
     for (i, source) in sources.iter().enumerate() {
         if sources[..i].iter().any(|p| p.name.eq_ignore_ascii_case(&source.name)) {
             errors[i].push(StError::general(format!("Program '{}' already exists.", source.name)));
@@ -222,31 +247,22 @@ pub fn compile_sources(sources: &[ProgramSource], mappings: &[Mapping], config: 
                 // Breakpoints can stop in block bodies too.
                 lines[i] = file.function_blocks.iter().flat_map(|fb| statement_lines(&fb.body)).collect();
                 fbs.extend(file.function_blocks.into_iter().map(|fb| FunctionBlockDef { file: source.name.clone(), ..fb }));
+                type_file.extend(std::iter::repeat_n(i, file.types.len()));
+                type_decls.extend(file.types);
                 // A file with only FUNCTION_BLOCKs defines types; it has nothing to run.
                 let Some(ast) = file.program else { continue };
                 has_program[i] = true;
                 lines[i].extend(statement_lines(&ast.body));
                 lines[i].sort_unstable();
                 lines[i].dedup();
-                variables[i] = ast
-                    .vars
-                    .iter()
-                    .map(|v| DeclaredVariable {
-                        name: v.name.clone(),
-                        data_type: match v.var_type {
-                            VarType::Elementary(t) => t.name().to_string(),
-                            VarType::FunctionBlock(kind) => kind.name().to_string(),
-                            VarType::UserFb(_) => v.type_name.clone(),
-                        },
-                    })
-                    .collect();
+                variables[i] = ast.vars.iter().map(|v| DeclaredVariable { name: v.name.clone(), data_type: written_type(v) }).collect();
                 parsed.push((source.name.clone(), ast));
                 index.push(i);
             }
             Err(e) => errors[i].push(e),
         }
     }
-    let (project, mapping) = match compile_project(parsed, fbs, mappings, config) {
+    let (project, mapping) = match compile_project(parsed, fbs, &type_decls, mappings, config) {
         Ok(mut project) => {
             for program in &mut project.programs {
                 program.file = index[program.file]; // compiled-program index → source file
@@ -259,6 +275,9 @@ pub fn compile_sources(sources: &[ProgramSource], mappings: &[Mapping], config: 
             }
             for (k, e) in semantic.function_blocks.into_iter().enumerate() {
                 errors[fb_file[k]].extend(e);
+            }
+            for (k, e) in semantic.types.into_iter().enumerate() {
+                errors[type_file[k]].extend(e);
             }
             (None, semantic.mapping)
         }

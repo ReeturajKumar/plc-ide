@@ -308,20 +308,9 @@ impl From<WireMember> for Member {
     }
 }
 
+/// JSON numbers carry no IEC type: give the untagged value its declared one.
 fn typed(value: Value, data_type: DataType) -> Value {
-    let integer = match value {
-        Value::Int(n) => i64::from(n),
-        Value::DInt(n) => i64::from(n),
-        Value::Time(ms) => ms,
-        _ => return value,
-    };
-    match data_type {
-        DataType::Int => i16::try_from(integer).map_or(value, Value::Int),
-        DataType::DInt => i32::try_from(integer).map_or(value, Value::DInt),
-        DataType::Time => Value::Time(integer),
-        DataType::Real => Value::Real(integer as f64),
-        DataType::Bool => value,
-    }
+    value.convert(data_type).unwrap_or(value)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

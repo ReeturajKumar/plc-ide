@@ -112,6 +112,15 @@ pub fn validate(mappings: &[Mapping], config: &IoConfig, scope: &Scope, io: &Sym
             Endpoint::Variable { owner, symbol } => {
                 (symbol.data_type().unwrap_or(DataType::Bool), format!("variable '{}'", symbol.name), format!("{owner}.{}", key(&symbol.name)))
             }
+            Endpoint::Instance { symbol } if scope.interface(symbol.var_type).is_none() => {
+                errors.push(mapping_error(format!(
+                    "Cannot map {what} to '{}': it is {}; map a single {} variable.",
+                    symbol.name,
+                    scope.type_name(symbol.var_type),
+                    kind.data_type().name()
+                )));
+                continue;
+            }
             Endpoint::Instance { symbol } => {
                 let fb = scope.interface(symbol.var_type);
                 let example = fb.as_ref().and_then(|f| f.outputs.first().map(|(n, _)| n.clone())).unwrap_or_else(|| "…".into());
