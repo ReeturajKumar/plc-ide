@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { Variable } from "../types/protocol";
 
 export interface Notification {
     id: string;
@@ -13,6 +14,9 @@ export type ExplorerEdit =
     | { mode: "create"; kind: "file" | "folder"; parent: string }
     | { mode: "rename"; path: string };
 export type ConfirmChoice = "save" | "discard" | "cancel";
+
+/** Values the user gave the program's inputs before RUN. */
+export type InputValues = [Variable, boolean | number | string][];
 
 interface ConfirmPrompt {
     title: string;
@@ -93,10 +97,17 @@ interface UIState {
     /** Show a Save / Don't Save / Cancel prompt; resolves with the user's choice. */
     confirmUnsaved: (prompt: ConfirmPrompt) => Promise<ConfirmChoice>;
     resolveConfirm: (choice: ConfirmChoice) => void;
+
+    /** The inputs asked for before RUN (see InputsDialog), if that prompt is open. */
+    inputsPrompt: Variable[] | null;
+    /** Ask for values of `inputs`; resolves with them ([] to keep the current ones), or null if cancelled. */
+    askInputs: (inputs: Variable[]) => Promise<InputValues | null>;
+    resolveInputs: (values: InputValues | null) => void;
 }
 
 // Resolver for the active confirm prompt, kept out of state so it isn't serialized/rendered.
 let confirmResolver: ((choice: ConfirmChoice) => void) | null = null;
+let inputsResolver: ((values: InputValues | null) => void) | null = null;
 
 export const useUIStore = create<UIState>((set) => ({
     sidebarVisible: true,
@@ -162,5 +173,17 @@ export const useUIStore = create<UIState>((set) => ({
         confirmResolver?.(choice);
         confirmResolver = null;
         set({ confirmPrompt: null });
+    },
+
+    inputsPrompt: null,
+    askInputs: (inputs) =>
+        new Promise<InputValues | null>((resolve) => {
+            inputsResolver = resolve;
+            set({ inputsPrompt: inputs });
+        }),
+    resolveInputs: (values) => {
+        inputsResolver?.(values);
+        inputsResolver = null;
+        set({ inputsPrompt: null });
     },
 }));

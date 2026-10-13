@@ -70,6 +70,13 @@ pub fn resolve<'a>(name: &str, scope: &Scope<'a>) -> Result<Endpoint<'a>, String
     })
 }
 
+/// Whether the variable (or instance, for `Instance.Member`) a mapping names no longer
+/// exists at all: the mapping is stale, not merely wrong (a type mismatch, a bad member).
+pub fn gone(name: &str, scope: &Scope) -> bool {
+    let root = name.rsplit_once('.').map_or(name, |(prefix, _)| prefix);
+    [name, root].iter().all(|n| scope.lookup(n).is_none() && scope.declared_in(n).is_empty())
+}
+
 /// Function block inputs that mappings feed from DI/AI, as "INSTANCE.MEMBER" (upper case):
 /// a call doesn't need to give those inputs, and mustn't also set them.
 pub fn mapped_block_inputs(mappings: &[Mapping], config: &IoConfig) -> HashSet<String> {

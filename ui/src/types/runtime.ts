@@ -91,4 +91,6 @@ export interface CompileResult {
 export interface CompileReport {
     programs: CompileResult[];
     mapping: StError[];
+    /** Addresses of mappings whose variable no longer exists. */
+    staleMappings: string[];
 }

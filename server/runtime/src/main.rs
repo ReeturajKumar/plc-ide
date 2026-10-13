@@ -35,6 +35,7 @@ use myplc_core::protocol::{self, ErrorCode, ProtocolError, RuntimeState};
 
 mod host;
 mod server;
+mod tags;
 
 const USAGE: &str = "usage: myplc-runtime --listen <address:port> [--token <secret>] [--data <folder>]
        myplc-runtime <project-dir> [--scan-ms N] [--scans N] [--trace] [--io simulated]";
@@ -303,6 +304,7 @@ fn run(config: RuntimeConfig, programs: Vec<ProgramSource>, mappings: Vec<Mappin
 }
 
 fn main() -> ExitCode {
+    tags::load_env_file();
     if env::args().any(|a| a == "--listen") {
         return match server_config(env::args().skip(1)) {
             Ok(config) => server::serve(config),

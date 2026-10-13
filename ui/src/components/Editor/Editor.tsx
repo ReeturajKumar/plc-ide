@@ -8,20 +8,27 @@ import type { MenuItem } from "../common/Menu";
 import { locationPath, toggleBreakpoint } from "../../store/runActions";
 import { useProjectStore } from "../../store/projectStore";
 import { useSimulatorStore } from "../../store/simulatorStore";
-import type { editor as MonacoEditorNs } from "monaco-editor";
-import { getEditor, insertFunctionBlock, setEditor } from "../../utils/editorRef";
+import type { editor as MonacoEditorNs, Position } from "monaco-editor";
+import { getEditor, insertFunctionBlock, insertSnippet, setEditor } from "../../utils/editorRef";
 import { FB_DRAG_TYPE } from "../../utils/fbInsert";
 import { useUIStore } from "../../store/uiStore";
 import type { FbSummary } from "../../types/runtime";
 import { useConsoleStore } from "../../store/consoleStore";
 import { FileIcon } from "../common/FileIcons";
 import { isBuiltinPath, languageFor } from "../../utils/project";
+import { findTag, tagHover } from "../../utils/tags";
+import { SNIPPETS, SNIPPET_DRAG_TYPE, snippetDoc, snippetPreview } from "../../utils/snippets";
+import { fbHover } from "../../utils/fbDocs";
 
 // Register the ST language + dark theme BEFORE the editor is created, so the
 // `theme="st-dark"` prop applies immediately (otherwise Monaco flashes the
 // default light theme — a white background — until onMount runs).
+// Once per Monaco instance: Monaco ships its own "st" language, so "is st registered?"
+// can't tell whether this ran.
+let structuredTextReady = false;
 const setupStructuredText: BeforeMount = (monaco) => {
-    if (monaco.languages.getLanguages().some((l: { id: string }) => l.id === "st")) return;
+    if (structuredTextReady) return;
+    structuredTextReady = true;
 
     monaco.languages.register({ id: "st" });
     monaco.languages.setMonarchTokensProvider("st", {
@@ -38,11 +45,11 @@ const setupStructuredText: BeforeMount = (monaco) => {
             "BOOL", "BYTE", "WORD", "DWORD", "LWORD", "SINT", "INT", "DINT",
             "LINT", "USINT", "UINT", "UDINT", "ULINT", "REAL", "LREAL",
             "TIME", "DATE", "TOD", "DT", "TIME_OF_DAY", "DATE_AND_TIME", "CHAR", "WCHAR", "STRING", "WSTRING", "ARRAY",
-            "TON", "TOF", "TP", "CTU", "CTD", "R_TRIG", "F_TRIG",
+            "TON", "TOF", "TP", "CTU", "CTD", "CTUD", "R_TRIG", "F_TRIG", "SR", "RS",
         ],
         builtins: [
             "ABS", "SQRT", "MIN", "MAX", "TRUNC", "ROUND", "SIN", "COS",
-            "SHL", "SHR", "ROL", "ROR", "LEN", "CONCAT", "LEFT", "RIGHT", "MID", "FIND", "ADR", "ISVALIDREF", "__ISVALIDREF",
+            "SHL", "SHR", "ROL", "ROR", "LEN", "CONCAT", "LEFT", "RIGHT", "MID", "FIND", "ADR", "ISVALIDREF", "__ISVALIDREF", "MOVE",
         ],
         tokenizer: {
             root: [
@@ -61,13 +68,52 @@ const setupStructuredText: BeforeMount = (monaco) => {
                 [/\d[\d_]*\.\d[\d_]*(e[+-]?\d+)?/i, "number.float"],
                 [/\d[\d_]*/, "number"],
                 [/#/, "delimiter"],
-                [/:=|[=<>]+|[-+*/]/, "operator"],
+                [/:=|[=<>]+|[-+*/&]/, "operator"],
                 [/[;:.,()]/, "delimiter"],
             ],
             comment: [
                 [/\*\)/, "comment", "@pop"],
                 [/./, "comment"],
             ],
+        },
+    });
+
+    // Typing an operation's name (ADD, GT, MOVE, …) offers its template.
+    monaco.languages.registerCompletionItemProvider("st", {
+        provideCompletionItems: (model: MonacoEditorNs.ITextModel, position: Position) => {
+            const word = model.getWordUntilPosition(position);
+            const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
+            return {
+                suggestions: SNIPPETS.map((s) => ({
+                    label: { label: s.name, description: s.group },
+                    kind: monaco.languages.CompletionItemKind.Snippet,
+                    insertText: s.template,
+                    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                    documentation: { value: snippetDoc(s) },
+                    detail: snippetPreview(s.template),
+                    range,
+                })),
+            };
+        },
+    });
+
+    // Hovering explains a standard block (TON, CTUD, …), an operation (MOVE, AND, …) or a
+    // SCADA tag.
+    monaco.languages.registerHoverProvider("st", {
+        provideHover: async (model: MonacoEditorNs.ITextModel, position: Position) => {
+            const word = model.getWordAtPosition(position);
+            if (!word) return null;
+            const op = SNIPPETS.find((s) => s.name.toUpperCase() === word.word.toUpperCase());
+            const tag = await findTag(word.word);
+            const sections =
+                (await fbHover(word.word)) ??
+                (op ? [`**${op.name}** — ${op.group.toLowerCase()} operation`, snippetDoc(op), `\`${snippetPreview(op.template)}\``] : null) ??
+                (tag ? tagHover(tag) : null);
+            if (!sections) return null;
+            return {
+                range: new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn),
+                contents: sections.map((value) => ({ value })),
+            };
         },
     });
 
@@ -302,18 +348,23 @@ const Editor = () => {
             {/* Editor canvas */}
             <div
                 className="flex-1 theme-editor-canvas overflow-hidden"
-                // Function blocks dragged from the library: declare + call where dropped.
+                // From the library: a function block (declare + call where dropped) or an
+                // operation template (inserted where dropped).
                 onDragOver={(e) => {
-                    if (!e.dataTransfer.types.includes(FB_DRAG_TYPE)) return;
+                    const types = e.dataTransfer.types;
+                    if (!types.includes(FB_DRAG_TYPE) && !types.includes(SNIPPET_DRAG_TYPE)) return;
                     e.preventDefault();
                     e.dataTransfer.dropEffect = "copy";
                 }}
                 onDrop={(e) => {
-                    const data = e.dataTransfer.getData(FB_DRAG_TYPE);
-                    if (!data) return;
+                    const fb = e.dataTransfer.getData(FB_DRAG_TYPE);
+                    const snippet = e.dataTransfer.getData(SNIPPET_DRAG_TYPE);
+                    if (!fb && !snippet) return;
                     e.preventDefault();
-                    const line = getEditor()?.getTargetAtClientPoint(e.clientX, e.clientY)?.position?.lineNumber;
-                    const problem = insertFunctionBlock(JSON.parse(data) as FbSummary, line);
+                    const position = getEditor()?.getTargetAtClientPoint(e.clientX, e.clientY)?.position ?? undefined;
+                    const problem = fb
+                        ? insertFunctionBlock(JSON.parse(fb) as FbSummary, position?.lineNumber)
+                        : insertSnippet(snippet, position);
                     if (problem) useUIStore.getState().notify("info", problem);
                 }}
             >
@@ -336,6 +387,9 @@ const Editor = () => {
                             lineHeight: 20,
                             fontFamily: APP_FONT,
                             fontLigatures: true,
+                            // Hovers and suggestions may extend past the editor's edges
+                            // (e.g. a tag hover on the first lines) instead of being cut off.
+                            fixedOverflowWidgets: true,
                             dropIntoEditor: { enabled: false }, // library drops are handled above
                             minimap: { enabled: minimap, renderCharacters: false },
                             wordWrap: wordWrap ? "on" : "off",

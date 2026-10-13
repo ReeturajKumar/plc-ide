@@ -3,6 +3,7 @@ import Welcome from "./pages/Welcome/Welcome";
 import Workspace from "./pages/Workspace/Workspace";
 import NewProjectDialog from "./components/dialogs/NewProjectDialog";
 import ConfirmDialog from "./components/dialogs/ConfirmDialog";
+import InputsDialog from "./components/dialogs/InputsDialog";
 import Notifications from "./components/common/Notifications";
 import { useProjectStore } from "./store/projectStore";
 import { useUIStore } from "./store/uiStore";
@@ -22,6 +23,7 @@ function App() {
             {/* Global overlays */}
             {activeDialog === "newProject" && <NewProjectDialog />}
             <ConfirmDialog />
+            <InputsDialog />
             <Notifications />
         </>
     );

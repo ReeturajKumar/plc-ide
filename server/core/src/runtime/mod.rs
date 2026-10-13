@@ -27,7 +27,7 @@ use executor::{initial_value, instantiate, slot, Memory, Slots, Unit, UserFbs};
 use scan_cycle::ScanCycle;
 
 use crate::io::{IoConfig, MappingTarget, ResolvedMapping};
-use crate::compiler::ast::{TypeDef, VarType};
+use crate::compiler::ast::{DataType, TypeDef, VarType};
 use crate::compiler::error::{StError, StErrors, StResult};
 use crate::compiler::project::CompiledProject;
 use crate::compiler::symbols::{key, var_type_def, Scope, SymbolTable};
@@ -53,6 +53,11 @@ pub struct Runtime {
     fbs: UserFbs,
     debugger: DebuggerState,
     cycle: ScanCycle,
+    /// The SCADA tags (in the I/O table, after the I/O addresses).
+    tag_names: Vec<String>,
+    /// Their latest values from outside (`set_tag`), by slot: copied in at the start of
+    /// every scan, like inputs, and kept across resets.
+    tag_values: HashMap<String, Value>,
 }
 
 /// Where a mapping reads or writes: a memory slot (a variable, or a project block's
@@ -68,7 +73,7 @@ impl Runtime {
     /// initial value. An initial value that can't be evaluated is an error of its program:
     /// the result is then each program's errors, in order (empty for those that are fine).
     pub fn load(project: CompiledProject) -> Result<Self, Vec<StErrors>> {
-        let CompiledProject { programs, function_blocks: defs, mappings, context } = project;
+        let CompiledProject { programs, function_blocks: defs, mappings, context, .. } = project;
         // Source files: the programs' (named after their file), then the blocks' files.
         let mut files: Vec<String> = programs.iter().map(|p| p.name.clone()).collect();
         let file_ids = defs
@@ -117,6 +122,16 @@ impl Runtime {
         for (address, kind) in context.config.points() {
             initial.values.insert(slot(io_index, &address), Value::default_for(kind.data_type()));
         }
+        // The rest of the I/O table: SCADA tags, 0 / FALSE until a value arrives. Only the
+        // ones the programs use: the others need no memory, and the monitor shows these.
+        let mut tag_names = Vec::new();
+        for symbol in context.tables.last().map(SymbolTable::iter).into_iter().flatten().filter(|s| s.is_used()) {
+            let tag_slot = slot(io_index, &symbol.name);
+            if let (false, Some(data_type)) = (initial.values.contains_key(&tag_slot), symbol.data_type()) {
+                initial.values.insert(tag_slot, Value::default_for(data_type));
+                tag_names.push(symbol.name.clone());
+            }
+        }
         // What each name in each program refers to: its own variable, another program's,
         // or an I/O address (the context's tables end with the I/O table).
         let slots: Vec<Slots> = (0..programs.len())
@@ -149,6 +164,8 @@ impl Runtime {
             fbs,
             debugger: DebuggerState::default(),
             cycle: ScanCycle::default(),
+            tag_names,
+            tag_values: HashMap::new(),
         };
         runtime.wire(&mappings);
         Ok(runtime)
@@ -199,8 +216,22 @@ impl Runtime {
     /// and restart the PLC clock and cycle count.
     pub fn reset(&mut self) {
         self.memory = self.initial.clone();
+        self.memory.values.extend(self.tag_values.clone());
         self.debugger.suspended = None;
         self.reset_cycle();
+    }
+
+    /// The latest value of SCADA tag `name` (a number; a BOOL tag is TRUE when it isn't
+    /// 0). Programs see it from now on. Unknown tags are ignored.
+    pub fn set_tag(&mut self, name: &str, value: f64) {
+        let tag_slot = slot(self.io_index, name);
+        let value = match self.memory.values.get(&tag_slot) {
+            Some(Value::Bool(_)) => Value::Bool(value != 0.0),
+            Some(Value::Real(_)) if value.is_finite() => Value::Real(value),
+            _ => return,
+        };
+        self.memory.values.insert(tag_slot.clone(), value.clone());
+        self.tag_values.insert(tag_slot, value);
     }
 
     /// Write a variable that `program` declares, from outside; also an element, named as
@@ -216,13 +247,14 @@ impl Runtime {
         let var_slot = slot(unit, root);
         let current =
             self.memory.values.get_mut(&var_slot).and_then(|v| v.at_mut(&positions)).ok_or_else(unknown)?;
-        if current.data_type() != value.data_type() {
-            return Err(StError::general(format!(
-                "Type mismatch: '{name}' is {}, cannot set it to a {} value.",
-                current.data_type().name(),
-                value.data_type().name()
-            )));
-        }
+        // A JSON number has no IEC type: take it as the variable's (range-checked).
+        let to = current.data_type();
+        let elementary = !matches!(to, DataType::Array | DataType::Struct | DataType::Pointer);
+        let value = value
+            .convert(to)
+            .ok()
+            .filter(|_| elementary)
+            .ok_or_else(|| StError::general(format!("'{name}' is {}: {} doesn't fit it.", to.name(), value.to_text())))?;
         *current = value;
         let whole = self.memory.values.get(&var_slot).cloned().ok_or_else(unknown)?;
         self.record_edit(var_slot, whole);

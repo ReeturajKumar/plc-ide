@@ -12,3 +12,4 @@ path = "src/main.rs"
 myplc-core = { path = "../core" }
 serde_json = "1"
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+postgres = "0.19"

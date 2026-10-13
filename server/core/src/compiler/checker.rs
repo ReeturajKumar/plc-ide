@@ -709,7 +709,7 @@ impl Checker<'_> {
                             ErrorKind::InvalidAssignment,
                             *line,
                             *column,
-                            format!("Can't assign to '{target}': PLC inputs are read-only in programs"),
+                            format!("Can't assign to '{target}': PLC inputs and SCADA tags are read-only in programs"),
                         ));
                         None
                     }
@@ -760,7 +760,7 @@ impl Checker<'_> {
                 let root = root_variable(target);
                 let at = |kind: ErrorKind, message: String| err(kind, *line, *column, message);
                 match symbols.get(root).map(|s| s.read_only) {
-                    Some(true) => self.report(at(ErrorKind::InvalidAssignment, format!("Can't assign to '{root}': PLC inputs are read-only in programs"))),
+                    Some(true) => self.report(at(ErrorKind::InvalidAssignment, format!("Can't assign to '{root}': PLC inputs and SCADA tags are read-only in programs"))),
                     Some(false) => symbols.mark_written(root),
                     None => {
                         self.report(at(ErrorKind::UndeclaredVariable, symbols.undeclared(root, "variable")));
@@ -1426,6 +1426,10 @@ fn function_type(function: StdFunction, args: &[Expr], types: &[Ty], call: &Expr
         invalid(args[i].line, args[i].column, format!("Type error: {name} expects {expected}, found {}", types[i].name()))
     };
     match function {
+        StdFunction::Move if matches!(types[0], Ty::Composite(_) | Ty::Address(_)) => {
+            Err(wrong(0, "an elementary value (copy arrays and structures with :=)"))
+        }
+        StdFunction::Move => Ok(types[0]),
         StdFunction::Abs if types[0].is_numeric() => Ok(types[0]),
         StdFunction::Abs => Err(wrong(0, "a number")),
         StdFunction::Sqrt | StdFunction::Sin | StdFunction::Cos | StdFunction::Trunc | StdFunction::Round => {
@@ -1538,8 +1542,8 @@ fn lower_as(expr: &Expr, ty: DataType, symbols: &Scope) -> StResult<Expr> {
         ExprKind::Call { name, args } => {
             let natural = |a: &Expr| infer(a, symbols).map(Ty::concrete);
             let arg_types = match StdFunction::from_name(name) {
-                // ABS, MIN and MAX compute in their result type.
-                Some(StdFunction::Abs | StdFunction::Min | StdFunction::Max) => vec![ty; args.len()],
+                // ABS, MIN, MAX and MOVE compute in their result type.
+                Some(StdFunction::Abs | StdFunction::Min | StdFunction::Max | StdFunction::Move) => vec![ty; args.len()],
                 Some(StdFunction::Shl | StdFunction::Shr | StdFunction::Rol | StdFunction::Ror) => vec![ty, natural(&args[1])?],
                 Some(StdFunction::Concat) => vec![ty; args.len()],
                 // The strings keep their type; lengths and positions theirs.

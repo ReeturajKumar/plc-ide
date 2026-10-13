@@ -9,7 +9,6 @@ use std::thread;
 use std::time::Duration;
 
 use myplc_core::compiler::project::{ProgramSource, ProjectContext};
-use myplc_core::compiler::value::Value;
 use myplc_core::io::{self, IoImage, Mapping};
 use myplc_core::protocol::{Breakpoint, Command, ErrorCode, ProtocolError, RunOptions, RuntimeState, RuntimeStatus, ScanError};
 use myplc_core::runtime::{Runtime, ScanOutcome, Stop};
@@ -37,6 +36,9 @@ struct Inner {
     generation: u64,
     /// Told about every finished scan (see `Host::on_scan`).
     observer: Option<ScanObserver>,
+    /// The latest SCADA tag values (see `Host::set_tag_values`), also given to the next
+    /// project loaded.
+    tag_values: Vec<(String, f64)>,
 }
 
 /// Sees the state after each scan that completed or failed; returning false asks the host
@@ -124,12 +126,24 @@ impl Host {
                 breakpoints: Vec::new(),
                 generation: 0,
                 observer: None,
+                tag_values: Vec::new(),
             })),
         }
     }
 
     pub fn state(&self) -> RuntimeState {
         lock(&self.inner).state()
+    }
+
+    /// The latest SCADA tag values (name, value); programs see them from the next scan.
+    pub fn set_tag_values(&self, values: Vec<(String, f64)>) {
+        let mut inner = lock(&self.inner);
+        if let Some(runtime) = inner.runtime.as_mut() {
+            for (name, value) in &values {
+                runtime.set_tag(name, *value);
+            }
+        }
+        inner.tag_values = values;
     }
 
     /// Watch every scan as it finishes (e.g. to trace it, or to end a run after N scans).
@@ -155,7 +169,7 @@ impl Host {
             Command::SetVariable { program, name, value } => {
                 let mut inner = lock(&self.inner);
                 let runtime = inner.runtime.as_mut().ok_or_else(|| rejected("Press RUN to load the program before changing inputs."))?;
-                runtime.set_in(&program, &name, Value::Bool(value)).map_err(|e| rejected(e.message))?;
+                runtime.set_in(&program, &name, value).map_err(|e| rejected(e.message))?;
                 Ok(inner.state())
             }
             Command::SetBreakpoints { breakpoints } => {
@@ -168,7 +182,8 @@ impl Host {
                 Ok(inner.state())
             }
             Command::ApplyIoMappings { mappings } => self.apply_mappings(&mappings),
-            Command::GetState => Ok(self.state()),
+            // The server answers GET_TAGS from the tag database; the PLC isn't involved.
+            Command::GetState | Command::GetTags => Ok(self.state()),
         }
     }
 
@@ -176,7 +191,13 @@ impl Host {
     /// scan stops. With any compile error nothing stays loaded. Simulated inputs keep their
     /// values; outputs go to their safe state.
     fn load_project(&self, programs: &[ProgramSource], mappings: &[Mapping], scan_time_ms: Option<u64>) -> Result<RuntimeState, ProtocolError> {
-        let loaded = load_on_engine_stack(programs, mappings);
+        // The SCADA tags programs can use; none if the tag database isn't set up or reachable.
+        let tags = crate::tags::load().unwrap_or_else(|e| {
+            eprintln!("[tags] {e}");
+            Vec::new()
+        });
+        let tags: Vec<_> = tags.into_iter().map(|t| (t.name, t.st_type)).collect();
+        let loaded = load_on_engine_stack(programs, mappings, &tags);
         let mut inner = lock(&self.inner);
         inner.generation += 1;
         inner.status = RuntimeStatus::Stopped;
@@ -191,6 +212,9 @@ impl Host {
             }
         };
         runtime.set_breakpoints(&inner.breakpoint_pairs());
+        for (name, value) in &inner.tag_values {
+            runtime.set_tag(name, *value);
+        }
         inner.runtime = Some(runtime);
         inner.context = Some(context);
         inner.scan_time_ms = scan_time_ms.unwrap_or(DEFAULT_SCAN_MS).clamp(MIN_SCAN_MS, MAX_SCAN_MS);

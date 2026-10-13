@@ -206,6 +206,7 @@ export async function saveActive(): Promise<boolean> {
     try {
         await fsApi.writeFile(project.rootPath, active.path, active.content);
         editor.markFileSaved(active.path);
+        void checkIoMappings(); // drops mappings to variables the change removed
         return true;
     } catch (e) {
         return fail(e);
@@ -226,6 +227,7 @@ export async function saveAll(): Promise<boolean> {
             return fail(e);
         }
     }
+    void checkIoMappings(); // drops mappings to variables the change removed
     return true;
 }
 

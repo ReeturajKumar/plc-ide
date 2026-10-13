@@ -63,6 +63,10 @@ impl Runtime {
     /// READ INPUTS, the first step of a scan: take every input, then copy them into the
     /// mapped variables. Programs see these values for the whole scan.
     fn read_inputs(&mut self, io: &dyn IoProvider) {
+        // SCADA tags: their latest values (programs only read them).
+        for (tag_slot, value) in &self.tag_values {
+            self.memory.values.insert(tag_slot.clone(), value.clone());
+        }
         for kind in [IoKind::DigitalInput, IoKind::AnalogInput] {
             for index in 0..self.io_config.count(kind) {
                 let value = match kind {

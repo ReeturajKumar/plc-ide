@@ -24,10 +24,11 @@ export type Command =
     | { command: "STEP_SCAN" }
     | { command: "STEP_STATEMENT" }
     | { command: "SET_INPUT"; payload: { address: string; value: boolean | number } }
-    | { command: "SET_VARIABLE"; payload: { program: string; name: string; value: boolean } }
+    | { command: "SET_VARIABLE"; payload: { program: string; name: string; value: boolean | number | string } }
     | { command: "SET_BREAKPOINTS"; payload: { breakpoints: Breakpoint[] } }
     | { command: "APPLY_IO_MAPPINGS"; payload: { mappings: IoMapping[] } }
-    | { command: "GET_STATE" };
+    | { command: "GET_STATE" }
+    | { command: "GET_TAGS" };
 
 /** `file` is the source file's name in the project, as `Location.file` reports it. */
 export interface Breakpoint {
@@ -37,11 +38,31 @@ export interface Breakpoint {
 
 // ---------------------------------------------------------------- runtime → UI
 
+/** A SCADA tag from the tag database (answer to GET_TAGS). */
+export interface Tag {
+    name: string;
+    description: string;
+    /** The type ST code sees: BOOL, or REAL for (scaled) numbers. */
+    stType: DataType;
+    /** The type in the SCADA, e.g. "UInt16", "Float", "Boolean". */
+    scadaType: string;
+    unit: string;
+    device: string;
+    protocol: string;
+    /** The address on the device, e.g. Modbus register "40007". */
+    address: string;
+    /** Engineering value = raw × scaleFactor + scaleOffset. */
+    scaleFactor: number;
+    scaleOffset: number;
+    /** The SCADA's tag class (from st_tags). */
+    tagClass: string;
+}
+
 /** Anything the runtime sends: only a RESPONSE answers a request. */
 export type RuntimeMessage = ({ type: "RESPONSE" } & Response) | { type: "STATE_UPDATE"; state: RuntimeState };
 
 export type Response =
-    | { id: RequestId | null; success: true; data: { state: RuntimeState } }
+    | { id: RequestId | null; success: true; data: { state: RuntimeState; tags?: Tag[] } }
     | { id: RequestId | null; success: false; error: ProtocolError };
 
 export type ProtocolError = { message: string } & (

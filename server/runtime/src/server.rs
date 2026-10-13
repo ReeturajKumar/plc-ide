@@ -24,7 +24,7 @@ use tungstenite::handshake::server::{ErrorResponse, Request as HttpRequest, Resp
 use tungstenite::{Error as WsError, Message, WebSocket};
 
 use crate::host::Host;
-use myplc_core::protocol::{Command, ProtocolError, Request, Response, RuntimeMessage, RuntimeState};
+use myplc_core::protocol::{Command, ErrorCode, ProtocolError, Request, Response, ResponseData, RuntimeMessage, RuntimeState};
 use myplc_core::ENGINE_STACK_BYTES;
 
 /// How long a connection waits for a request before checking the state for an update.
@@ -96,6 +96,13 @@ fn decode(text: &str) -> Result<Request, Box<Response>> {
 /// Carry out a request; persist what must survive a restart.
 fn answer(host: &Host, saved: &Saved, request: Request) -> (Response, Option<RuntimeState>) {
     let Request { id, command } = request;
+    if command == Command::GetTags {
+        let response = match crate::tags::load() {
+            Ok(tags) => Response { id: Some(id), result: Ok(ResponseData { state: host.state(), tags: Some(tags) }) },
+            Err(message) => Response::error(Some(id), ProtocolError::new(ErrorCode::Unavailable, message)),
+        };
+        return (response, None);
+    }
     // What to remember if it succeeds: a new project (loaded STOPPED), or the RUN/STOP mode.
     let remember = match &command {
         Command::LoadProject { .. } => Some((Some(command.clone()), false)),
@@ -245,6 +252,10 @@ pub fn serve(config: ServerConfig) -> ExitCode {
         }
     };
     let host = Arc::new(Host::new());
+    if crate::tags::configured() {
+        let host = Arc::clone(&host);
+        thread::spawn(move || crate::tags::poll(host));
+    }
     let saved = Arc::new(Saved { dir: config.data_dir.clone() });
     saved.restore(&host);
     let token: Option<Arc<str>> = config.token.map(Into::into);

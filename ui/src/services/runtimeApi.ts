@@ -1,6 +1,6 @@
 import { runtimeEvents, runtimeTransport as transport } from "../utils/runtimeSocket";
 import type { CompileReport, IoMapping, ProgramSource, StError } from "../types/runtime";
-import type { Breakpoint, Command, ProtocolError, RuntimeState, ScanError } from "../types/protocol";
+import type { Breakpoint, Command, ProtocolError, RuntimeState, ScanError, Tag } from "../types/protocol";
 
 /**
  * The UI's only way to the PLC: user intents in, PLC state (or a `RuntimeApiError`) out.
@@ -90,8 +90,8 @@ export const runtimeApi = {
     /** Simulated inputs, by address ("DI0", "AI1"); they work whether or not the PLC runs. */
     setDigitalInput: (address: string, value: boolean) => send({ command: "SET_INPUT", payload: { address, value } }),
     setAnalogInput: (address: string, value: number) => send({ command: "SET_INPUT", payload: { address, value } }),
-    /** Set a BOOL variable a program declares. */
-    setVariable: (program: string, name: string, value: boolean) =>
+    /** Set a variable a program declares (converted to its type by the PLC). */
+    setVariable: (program: string, name: string, value: boolean | number | string) =>
         send({ command: "SET_VARIABLE", payload: { program, name, value } }),
     /** Replace every breakpoint: the UI keeps the list, the runtime does the stopping. */
     setBreakpoints: (breakpoints: Breakpoint[]) => send({ command: "SET_BREAKPOINTS", payload: { breakpoints } }),
@@ -107,6 +107,12 @@ export const runtimeApi = {
         }
     },
     getState: () => send({ command: "GET_STATE" }),
+    /** The SCADA tags from the backend's tag database. */
+    getTags: async (): Promise<Tag[]> => {
+        const response = await call(() => transport.request({ id: `ui-${++lastId}`, command: "GET_TAGS" }));
+        if (!response.success) throw toRuntimeError(response.error);
+        return response.data.tags ?? [];
+    },
 };
 
 type OnState = (state: RuntimeState) => void;

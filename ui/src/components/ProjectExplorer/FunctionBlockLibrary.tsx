@@ -8,7 +8,8 @@ import { useProjectStore } from "../../store/projectStore";
 import { useUIStore } from "../../store/uiStore";
 import { refreshFileKinds } from "../../store/runActions";
 import { compilerApi } from "../../services/compilerApi";
-import { insertFunctionBlock } from "../../utils/editorRef";
+import { insertFunctionBlock, insertSnippet } from "../../utils/editorRef";
+import { SNIPPETS, SNIPPET_DRAG_TYPE, snippetPreview, type Snippet } from "../../utils/snippets";
 import { FB_DRAG_TYPE } from "../../utils/fbInsert";
 import type { FbSummary } from "../../types/runtime";
 
@@ -108,6 +109,34 @@ const LibraryItem = ({ fb }: { fb: FbSummary }) => {
     );
 };
 
+/** An operation template (ADD, GT, MOVE, …): drag it into the editor, or double-click / Enter to insert at the cursor. */
+const OperationItem = ({ op }: { op: Snippet }) => {
+    const insert = () => {
+        const problem = insertSnippet(op.template);
+        if (problem) useUIStore.getState().notify("info", problem);
+    };
+    const preview = snippetPreview(op.template);
+    return (
+        <div
+            role="listitem"
+            tabIndex={0}
+            draggable
+            onDragStart={(e) => {
+                e.dataTransfer.setData(SNIPPET_DRAG_TYPE, op.template);
+                e.dataTransfer.effectAllowed = "copy";
+            }}
+            onDoubleClick={insert}
+            onKeyDown={(e) => e.key === "Enter" && insert()}
+            title={[op.description, preview, "Drag into the editor, or double-click (Enter) to insert at the cursor; Tab moves between the fields."].join("\n")}
+            className="flex items-center gap-1.5 py-0.5 pl-3 pr-1 cursor-grab active:cursor-grabbing hover:bg-[var(--theme-bg-hover)] focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--theme-border-focus)]"
+        >
+            <span className="w-6 shrink-0 rounded bg-amber-500/15 text-center text-[9px] font-semibold text-amber-300">OP</span>
+            <span className="text-[var(--theme-text-primary)]">{op.name}</span>
+            <span className="flex-1 truncate text-[11px] text-[var(--theme-text-muted)]">{preview}</span>
+        </div>
+    );
+};
+
 const Group = ({ title, items, empty }: { title: string; items: FbSummary[]; empty: string }) => (
     <div role="group" aria-label={title}>
         <div className="pl-3 pt-1 pb-0.5 text-[10px] font-semibold tracking-wider text-[var(--theme-text-muted)] uppercase">{title}</div>
@@ -172,6 +201,14 @@ const FunctionBlockLibrary = () => {
                 <div role="list" aria-label="Function block library" className="overflow-y-auto pb-2">
                     <Group title="Project" items={project} empty="None yet. Define one with FUNCTION_BLOCK … END_FUNCTION_BLOCK." />
                     <Group title="Standard" items={standard} empty="Loading…" />
+                    <div role="group" aria-label="Operations">
+                        <div className="pl-3 pt-1 pb-0.5 text-[10px] font-semibold tracking-wider text-[var(--theme-text-muted)] uppercase">
+                            Operations
+                        </div>
+                        {SNIPPETS.map((op) => (
+                            <OperationItem key={op.name} op={op} />
+                        ))}
+                    </div>
                 </div>
             )}
         </section>

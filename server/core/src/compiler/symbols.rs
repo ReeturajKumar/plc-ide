@@ -22,8 +22,9 @@ pub struct Symbol {
     pub column: usize,
     /// A PLC input (DI, AI): programs read it, only the I/O layer writes it.
     pub read_only: bool,
-    // A Cell, so writes can be recorded while the table is shared by the checker.
+    // Cells, so uses can be recorded while the table is shared by the checker.
     written: Cell<bool>,
+    used: Cell<bool>,
 }
 
 impl Symbol {
@@ -42,6 +43,11 @@ impl Symbol {
     /// The program assigns this symbol somewhere (`:=` or as a FOR loop variable).
     pub fn is_written(&self) -> bool {
         self.written.get()
+    }
+
+    /// Some program's code names this symbol.
+    pub fn is_used(&self) -> bool {
+        self.used.get()
     }
 }
 
@@ -66,6 +72,7 @@ impl SymbolTable {
             column,
             read_only: false,
             written: Cell::new(false),
+            used: Cell::new(false),
         });
         Ok(())
     }
@@ -229,8 +236,11 @@ impl<'a> Scope<'a> {
         }
     }
 
+    /// The symbol `name` refers to; records that the code uses it.
     pub fn get(&self, name: &str) -> Option<&'a Symbol> {
-        self.owner(name).and_then(|i| self.tables[i].get(name))
+        let symbol = self.owner(name).and_then(|i| self.tables[i].get(name))?;
+        symbol.used.set(true);
+        Some(symbol)
     }
 
     /// Record a write; it counts for the declaring program's symbol (so the monitor knows

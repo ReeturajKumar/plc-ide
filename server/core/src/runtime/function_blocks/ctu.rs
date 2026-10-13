@@ -1,4 +1,4 @@
-//! CTU — up counter. CV counts rising edges of CU; R resets CV; Q is CV >= PV.
+//! CTU — up counter. CV counts rising edges of CU; R (or RESET) resets CV; Q is CV >= PV.
 
 use super::Io;
 use crate::compiler::value::Value;
@@ -16,7 +16,7 @@ impl Ctu {
         self.previous_cu = cu;
 
         let mut count = io.int("CV");
-        if io.bool("R") {
+        if io.bool("R") || io.bool("RESET") {
             count = 0;
         } else if rising && count < i16::MAX {
             count += 1;

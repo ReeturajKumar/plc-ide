@@ -7,6 +7,7 @@ pub mod io;
 pub mod protocol;
 pub mod runtime;
 
+use compiler::ast::DataType;
 use compiler::project::{compile_sources, CompileReport, ProgramSource, ProjectContext};
 use io::{IoConfig, Mapping};
 use std::thread;
@@ -20,9 +21,15 @@ pub const ENGINE_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 /// Source files → compiler → compiled project → runtime: what every host does to load a
 /// project. Every file's errors come back at once; an initial value the runtime can't
-/// create is reported as an error of its program. Run it on an `ENGINE_STACK_BYTES` stack.
-pub fn load(programs: &[ProgramSource], mappings: &[Mapping], config: &IoConfig) -> (Option<(Runtime, ProjectContext)>, CompileReport) {
-    let (project, mut report) = compile_sources(programs, mappings, config);
+/// create is reported as an error of its program. `tags` are the SCADA tags (name, type)
+/// every program can read. Run it on an `ENGINE_STACK_BYTES` stack.
+pub fn load(
+    programs: &[ProgramSource],
+    mappings: &[Mapping],
+    config: &IoConfig,
+    tags: &[(String, DataType)],
+) -> (Option<(Runtime, ProjectContext)>, CompileReport) {
+    let (project, mut report) = compile_sources(programs, mappings, config, tags);
     let Some(project) = project else { return (None, report) };
     let context = project.context.clone();
     let files: Vec<usize> = project.programs.iter().map(|p| p.file).collect();
@@ -39,13 +46,17 @@ pub fn load(programs: &[ProgramSource], mappings: &[Mapping], config: &IoConfig)
 
 /// `load` with the standard I/O, on its own `ENGINE_STACK_BYTES` thread (so it is safe
 /// to call from any thread, however small its stack).
-pub fn load_on_engine_stack(programs: &[ProgramSource], mappings: &[Mapping]) -> (Option<(Runtime, ProjectContext)>, CompileReport) {
+pub fn load_on_engine_stack(
+    programs: &[ProgramSource],
+    mappings: &[Mapping],
+    tags: &[(String, DataType)],
+) -> (Option<(Runtime, ProjectContext)>, CompileReport) {
     let failed = |message: &str| CompileReport::failed(programs, message);
     thread::scope(|scope| {
         let loader = thread::Builder::new()
             .name("plc-load".into())
             .stack_size(ENGINE_STACK_BYTES)
-            .spawn_scoped(scope, || load(programs, mappings, &io::CONFIG))
+            .spawn_scoped(scope, || load(programs, mappings, &io::CONFIG, tags))
             .map_err(|_| (None, failed("Could not start the PLC engine.")));
         match loader {
             Ok(loader) => loader.join().unwrap_or_else(|_| (None, failed("The PLC engine failed while loading the program."))),
@@ -56,6 +67,6 @@ pub fn load_on_engine_stack(programs: &[ProgramSource], mappings: &[Mapping]) ->
 
 /// Compile every program (lexer → parser → semantic analysis) and check the I/O mappings,
 /// without running anything.
-pub fn compile(programs: &[ProgramSource], mappings: &[Mapping]) -> CompileReport {
-    load_on_engine_stack(programs, mappings).1
+pub fn compile(programs: &[ProgramSource], mappings: &[Mapping], tags: &[(String, DataType)]) -> CompileReport {
+    load_on_engine_stack(programs, mappings, tags).1
 }

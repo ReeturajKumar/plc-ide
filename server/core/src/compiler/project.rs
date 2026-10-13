@@ -100,9 +100,13 @@ pub fn standard_function_blocks() -> Vec<FbSummary> {
 
 /// Compiling a project: one result per file, in order, and the I/O mapping errors.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompileReport {
     pub programs: Vec<CompileResult>,
     pub mapping: StErrors,
+    /// Addresses of the mappings whose variable no longer exists (see `mapping::gone`).
+    #[serde(default)]
+    pub stale_mappings: Vec<String>,
 }
 
 impl CompileReport {
@@ -119,7 +123,7 @@ impl CompileReport {
                 has_program: false,
             })
             .collect();
-        Self { programs, mapping: StErrors::new() }
+        Self { programs, mapping: StErrors::new(), stale_mappings: Vec::new() }
     }
 }
 
@@ -171,6 +175,8 @@ pub struct CompiledProject {
     pub function_blocks: Vec<FunctionBlockDef>,
     pub mappings: Vec<ResolvedMapping>,
     pub context: ProjectContext,
+    /// See `CompileReport::stale_mappings`.
+    pub stale_mappings: Vec<String>,
 }
 
 /// Why a project doesn't compile: each program's and each FUNCTION_BLOCK's errors, in
@@ -182,6 +188,7 @@ pub struct ProjectErrors {
     /// Each TYPE declaration's.
     pub types: Vec<StErrors>,
     pub mapping: StErrors,
+    pub stale_mappings: Vec<String>,
 }
 
 /// Semantic analysis of parsed programs and FUNCTION_BLOCKs plus the I/O `mappings`, for
@@ -192,12 +199,23 @@ pub fn compile_project(
     type_decls: &[TypeDecl],
     mappings: &[Mapping],
     config: &IoConfig,
+    tags: &[(String, DataType)],
 ) -> Result<CompiledProject, ProjectErrors> {
     let mapped_inputs = mapping::mapped_block_inputs(mappings, config);
+    // SCADA tags sit with the I/O addresses: every program can read them, none can write.
+    let mut io = config.symbols();
+    for (name, data_type) in tags {
+        io.declare_io(name, VarType::Elementary(*data_type), true);
+    }
     let ProjectCheck { programs: results, function_blocks, type_errors, types, interfaces, tables, names } =
-        check_project(programs, fbs, type_decls, &config.symbols(), &mapped_inputs);
+        check_project(programs, fbs, type_decls, &io, &mapped_inputs);
     let context = ProjectContext { config: *config, tables, names, interfaces, types };
     let resolved = context.resolve_mappings(mappings);
+    let stale_mappings = {
+        let io = context.tables.len() - 1;
+        let scope = Scope::new(&context.tables, &context.names, io).with_fbs(&context.interfaces).with_types(&context.types);
+        mappings.iter().filter(|m| mapping::gone(&m.variable, &scope)).map(|m| m.address.clone()).collect()
+    };
     let failed = results.iter().any(Result::is_err)
         || function_blocks.iter().any(Result::is_err)
         || type_errors.iter().any(|e| !e.is_empty())
@@ -208,6 +226,7 @@ pub fn compile_project(
             function_blocks: function_blocks.into_iter().map(|r| r.err().unwrap_or_default()).collect(),
             types: type_errors,
             mapping: resolved.err().unwrap_or_default(),
+            stale_mappings,
         });
     }
     let programs = results
@@ -217,14 +236,19 @@ pub fn compile_project(
         .map(|(file, Checked { program, symbols })| CompiledProgram { name: context.names[file].clone(), program, symbols, file })
         .collect();
     let function_blocks = function_blocks.into_iter().flatten().map(|CheckedFb { def }| def).collect();
-    Ok(CompiledProject { programs, function_blocks, mappings: resolved.unwrap_or_default(), context })
+    Ok(CompiledProject { programs, function_blocks, mappings: resolved.unwrap_or_default(), context, stale_mappings })
 }
 
 /// Compile project source files: parse each (FUNCTION_BLOCKs and at most one PROGRAM), then
 /// analyze them together. Every file is compiled even when others fail, so all errors come
 /// back at once; a file with a syntax error can't share its variables with the others.
 /// Returns the compiled project if everything compiled, and the report either way.
-pub fn compile_sources(sources: &[ProgramSource], mappings: &[Mapping], config: &IoConfig) -> (Option<CompiledProject>, CompileReport) {
+pub fn compile_sources(
+    sources: &[ProgramSource],
+    mappings: &[Mapping],
+    config: &IoConfig,
+    tags: &[(String, DataType)],
+) -> (Option<CompiledProject>, CompileReport) {
     let n = sources.len();
     let mut errors: Vec<StErrors> = vec![StErrors::new(); n];
     let mut lines: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -262,11 +286,13 @@ pub fn compile_sources(sources: &[ProgramSource], mappings: &[Mapping], config: 
             Err(e) => errors[i].push(e),
         }
     }
-    let (project, mapping) = match compile_project(parsed, fbs, &type_decls, mappings, config) {
+    let stale_mappings;
+    let (project, mapping) = match compile_project(parsed, fbs, &type_decls, mappings, config, tags) {
         Ok(mut project) => {
             for program in &mut project.programs {
                 program.file = index[program.file]; // compiled-program index → source file
             }
+            stale_mappings = project.stale_mappings.clone();
             (Some(project), StErrors::new())
         }
         Err(semantic) => {
@@ -279,6 +305,7 @@ pub fn compile_sources(sources: &[ProgramSource], mappings: &[Mapping], config: 
             for (k, e) in semantic.types.into_iter().enumerate() {
                 errors[type_file[k]].extend(e);
             }
+            stale_mappings = semantic.stale_mappings;
             (None, semantic.mapping)
         }
     };
@@ -299,5 +326,5 @@ pub fn compile_sources(sources: &[ProgramSource], mappings: &[Mapping], config: 
             has_program,
         })
         .collect();
-    (project.filter(|_| ok), CompileReport { programs, mapping })
+    (project.filter(|_| ok), CompileReport { programs, mapping, stale_mappings })
 }

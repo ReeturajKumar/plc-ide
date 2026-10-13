@@ -543,6 +543,7 @@ pub fn tokenize(source: &str) -> Vec<Token> {
             (';', _) => (TokenKind::Semicolon, 1),
             ('[', _) => (TokenKind::LBracket, 1),
             ('^', _) => (TokenKind::Caret, 1),
+            ('&', _) => (TokenKind::And, 1),
             (']', _) => (TokenKind::RBracket, 1),
             _ => (TokenKind::Invalid(format!("Unexpected character '{c}'")), 1),
         };

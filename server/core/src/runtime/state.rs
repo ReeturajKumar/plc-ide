@@ -121,6 +121,18 @@ impl Runtime {
                 });
             }
         }
+        // The SCADA tags, read-only like the program's inputs it doesn't own.
+        for name in &self.tag_names {
+            let Some(value) = self.memory.values.get(&slot(self.io_index, name)) else { continue };
+            out.push(VariableState {
+                program: "SCADA".to_string(),
+                name: name.clone(),
+                data_type: value.data_type(),
+                value: value.clone(),
+                written_by_program: true,
+                io_address: None,
+            });
+        }
         out
     }
 

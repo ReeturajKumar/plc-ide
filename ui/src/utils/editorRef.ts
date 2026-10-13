@@ -20,6 +20,20 @@ export const runEditorAction = (action: string) => {
 export const getEditor = () => current;
 
 /**
+ * Insert a Monaco snippet (`${1:field}` placeholders) at `at` (where it was dropped) or the
+ * cursor. Returns why it couldn't, or null.
+ */
+export const insertSnippet = (template: string, at?: { lineNumber: number; column: number }): string | null => {
+    if (!current?.getModel()) return "Open a program to insert an operation.";
+    if (current.getRawOptions().readOnly) return "This editor is read-only (a standard block's definition, or the PLC is running).";
+    const snippets = current.getContribution("snippetController2") as { insert(template: string): void } | null;
+    if (at) current.setPosition(at);
+    current.focus();
+    snippets?.insert(template);
+    return null;
+};
+
+/**
  * Insert an instance of `fb` into the open program: its declaration in the VAR block and
  * a call before `line` (default: the cursor's line), as one undoable edit. Returns why it
  * couldn't, or null.

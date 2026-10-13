@@ -1,6 +1,7 @@
+import { useEffect, useState } from "react";
 import type { RuntimeStatus, Variable } from "../../types/protocol";
-import { toggleInput } from "../../store/runActions";
-import { formatValue, valueClass } from "./format";
+import { isTypedInput, setInput, toggleInput } from "../../store/runActions";
+import { formatValue, inputText, parseInput, valueClass } from "./format";
 
 interface VariableMonitorProps {
     variables: Variable[];
@@ -9,6 +10,53 @@ interface VariableMonitorProps {
 
 /** Never assigned by a program: its value comes from outside, so the user may drive it. */
 const isInput = (v: Variable) => !v.writtenByProgram;
+
+/** Type a new value for an input and press Enter (Escape undoes the edit). */
+const InputField = ({ v, disabled }: { v: Variable; disabled: boolean }) => {
+    const [text, setText] = useState(inputText(v.value));
+    const [editing, setEditing] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    // Follow the PLC's value unless the user is typing.
+    useEffect(() => {
+        if (!editing) setText(inputText(v.value));
+    }, [v.value, editing]);
+
+    const commit = () => {
+        setEditing(false);
+        if (text === inputText(v.value)) return setError(null);
+        const result = parseInput(v.dataType, text);
+        if (!result.ok) return setError(result.error);
+        setError(null);
+        void setInput(v.program, v.name, result.value);
+    };
+    return (
+        <input
+            value={text}
+            disabled={disabled}
+            onFocus={() => setEditing(true)}
+            onChange={(e) => {
+                setText(e.target.value);
+                setError(null);
+            }}
+            onBlur={commit}
+            onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+                if (e.key === "Escape") {
+                    setText(inputText(v.value));
+                    setError(null);
+                    setEditing(false);
+                    e.currentTarget.blur();
+                }
+            }}
+            aria-label={`Value of ${v.name}`}
+            aria-invalid={error !== null}
+            title={error ?? (disabled ? "Run the program to drive inputs" : `Type a value for ${v.name}, then press Enter`)}
+            className={`w-28 px-1.5 py-0.5 rounded border bg-[var(--theme-bg-input)] text-[11px] text-[var(--theme-text-primary)] focus:outline-none focus:border-[var(--theme-border-focus)] disabled:opacity-40 disabled:cursor-not-allowed ${
+                error ? "border-red-500/70" : "border-[var(--theme-border)]"
+            }`}
+        />
+    );
+};
 
 const VariableMonitor = ({ variables, status }: VariableMonitorProps) => {
     if (variables.length === 0) return null;
@@ -58,6 +106,8 @@ const VariableMonitor = ({ variables, status }: VariableMonitorProps) => {
                                 >
                                     {v.value ? "ON" : "OFF"}
                                 </button>
+                            ) : isTypedInput(v) ? (
+                                <InputField v={v} disabled={!canDrive} />
                             ) : (
                                 <span className="text-[11px] text-[var(--theme-text-muted)]">{isInput(v) ? "input" : "output"}</span>
                             )}

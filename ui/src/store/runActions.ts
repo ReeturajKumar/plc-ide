@@ -3,7 +3,8 @@ import { runtimeApi, runtimeState, toRuntimeError } from "../services/runtimeApi
 import { compilerApi } from "../services/compilerApi";
 import { baseName } from "../utils/project";
 import type { CompileReport, CompileResult, StError } from "../types/runtime";
-import type { RuntimeState } from "../types/protocol";
+import type { RuntimeState, Variable } from "../types/protocol";
+import { isTypable } from "../components/Simulator/format";
 import type { PLCProgram } from "../types/program";
 import { useEditorStore } from "./editorStore";
 import { useProjectStore } from "./projectStore";
@@ -108,8 +109,33 @@ function reportCompile(items: ProgramText[], results: CompileResult[], mapping: 
     return problems;
 }
 
+/**
+ * Remove the I/O mappings whose variable no longer exists (deleted or renamed in the
+ * code), save project.json, and say which. Only when every program compiles: while code
+ * has errors its variables are unknown, and mappings must not vanish mid-edit.
+ */
+export async function pruneStaleMappings(items: ProgramText[]): Promise<void> {
+    const mappings = ioMappings();
+    if (mappings.length === 0) return;
+    let report: CompileReport;
+    try {
+        report = await compilerApi.compile(toSources(items), mappings);
+    } catch {
+        return; // the compile that follows reports it
+    }
+    const stale = new Set(report.staleMappings);
+    if (stale.size === 0 || report.programs.some((p) => p.errors.length > 0)) return;
+    const removed = mappings.filter((m) => stale.has(m.address));
+    useProjectStore.getState().setIoMappings(mappings.filter((m) => !stale.has(m.address)));
+    await persistProjectJson();
+    const list = removed.map((m) => `${m.address} → ${m.variable}`);
+    useConsoleStore.getState().appendOutput([`[${stamp()}] Removed ${plural(removed.length, "I/O mapping")} to variables that no longer exist:`, ...list.map((l) => `  ${l}`), ""]);
+    useUIStore.getState().notify("info", `Removed ${plural(removed.length, "I/O mapping")} to deleted variables: ${list.join(", ")}`);
+}
+
 /** Compile `items` (the whole project, so shared variables resolve); report `only` of them. */
 async function compile(items: ProgramText[], only: ProgramText[], title: string): Promise<boolean> {
+    await pruneStaleMappings(items);
     const ps = useProjectStore.getState();
     ps.setCompiling(only.map((i) => i.program.path));
     let report: CompileReport;
@@ -244,8 +270,10 @@ export async function runProgram(paused = false): Promise<boolean> {
     const ps = useProjectStore.getState();
     ps.setCompiling(items.map((i) => i.program.path));
     await syncBreakpoints(); // the runtime may have restarted since they were set
+    await pruneStaleMappings(items);
     try {
-        const state = await (paused ? runtimeApi.load : runtimeApi.run)(toSources(items), ioMappings());
+        // Loaded paused, before the first scan: the inputs can be set before anything runs.
+        let state = await runtimeApi.load(toSources(items), ioMappings());
         ps.setCompiling([]);
         // Everything compiled from exactly these sources.
         for (const { program, source } of items) {
@@ -253,6 +281,18 @@ export async function runProgram(paused = false): Promise<boolean> {
             cs.setFileProblems(program.path, []);
         }
         cs.setFileProblems(IO_MAPPING_PATH, []);
+        const inputs = state.variables.filter(isTypedInput);
+        if (inputs.length > 0) {
+            applyState(state);
+            const values = await ui.askInputs(inputs);
+            if (values === null) {
+                await control(runtimeApi.stop);
+                cs.appendOutput(["  Run cancelled.", ""]);
+                return false;
+            }
+            for (const [v, value] of values) state = await runtimeApi.setVariable(v.program, v.name, value);
+        }
+        if (!paused) state = await runtimeApi.resume();
         applyState(state);
         cs.appendOutput([
             paused
@@ -364,6 +404,7 @@ export interface DeclaredVariable {
 export async function checkIoMappings(): Promise<DeclaredVariable[] | null> {
     const items = await projectSources();
     if (!items) return null;
+    await pruneStaleMappings(items);
     const mappings = ioMappings();
     try {
         const report = await compilerApi.compile(toSources(items), mappings);
@@ -408,7 +449,20 @@ export async function loadIoState(): Promise<void> {
 }
 
 export async function toggleInput(program: string, name: string, current: boolean): Promise<void> {
-    await control(() => runtimeApi.setVariable(program, name, !current));
+    await setInput(program, name, !current);
+}
+
+/** Give an input variable a value while the PLC is loaded (the next scan uses it). */
+export async function setInput(program: string, name: string, value: boolean | number | string): Promise<void> {
+    await control(() => runtimeApi.setVariable(program, name, value));
+}
+
+/**
+ * An input the user can give a value: no program writes it, no I/O drives it, and it's
+ * a BOOL or a typable type (numbers, text). SCADA tags come from the tag database.
+ */
+export function isTypedInput(v: Variable): boolean {
+    return !v.writtenByProgram && !v.ioAddress && v.program !== "SCADA" && (v.dataType === "BOOL" || isTypable(v.dataType));
 }
 
 /** Stop the simulator if it's active — used when the project it came from goes away. */

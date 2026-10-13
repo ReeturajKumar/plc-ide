@@ -120,6 +120,7 @@ const CTU: &str = "FUNCTION_BLOCK CTU
 VAR_INPUT
     CU : BOOL;      (* count up on each rising edge *)
     R  : BOOL;      (* reset CV to 0 *)
+    RESET : BOOL;   (* same as R *)
     PV : INT;       (* preset value *)
 END_VAR
 VAR_OUTPUT
@@ -130,7 +131,7 @@ VAR
     PreviousCU : BOOL;
 END_VAR
 
-IF R THEN
+IF R OR RESET THEN
     CV := 0;
 ELSIF CU AND NOT PreviousCU AND CV < 32767 THEN
     CV := CV + 1;
@@ -145,6 +146,7 @@ const CTD: &str = "FUNCTION_BLOCK CTD
 VAR_INPUT
     CD : BOOL;      (* count down on each rising edge *)
     LD : BOOL;      (* load CV with PV *)
+    LOAD : BOOL;    (* same as LD *)
     PV : INT;       (* preset value *)
 END_VAR
 VAR_OUTPUT
@@ -155,7 +157,7 @@ VAR
     PreviousCD : BOOL;
 END_VAR
 
-IF LD THEN
+IF LD OR LOAD THEN
     CV := PV;
 ELSIF CD AND NOT PreviousCD AND CV > -32768 THEN
     CV := CV - 1;
@@ -200,6 +202,72 @@ PreviousCLK := CLK;
 END_FUNCTION_BLOCK
 ";
 
+const CTUD: &str = "FUNCTION_BLOCK CTUD
+VAR_INPUT
+    CU    : BOOL;   (* count up on each rising edge *)
+    CD    : BOOL;   (* count down on each rising edge *)
+    RESET : BOOL;   (* reset CV to 0 *)
+    LOAD  : BOOL;   (* load CV with PV *)
+    PV    : INT;    (* preset value *)
+END_VAR
+VAR_OUTPUT
+    QU : BOOL;      (* CV >= PV *)
+    QD : BOOL;      (* CV <= 0 *)
+    CV : INT;       (* current value *)
+END_VAR
+VAR
+    PreviousCU : BOOL;
+    PreviousCD : BOOL;
+END_VAR
+
+IF RESET THEN
+    CV := 0;
+ELSIF LOAD THEN
+    CV := PV;
+ELSE
+    IF CU AND NOT PreviousCU AND CV < 32767 THEN
+        CV := CV + 1;
+    END_IF;
+    IF CD AND NOT PreviousCD AND CV > -32768 THEN
+        CV := CV - 1;
+    END_IF;
+END_IF;
+PreviousCU := CU;
+PreviousCD := CD;
+QU := CV >= PV;
+QD := CV <= 0;
+
+END_FUNCTION_BLOCK
+";
+
+const SR: &str = "FUNCTION_BLOCK SR
+VAR_INPUT
+    SET1  : BOOL;   (* set Q1; wins when both are TRUE *)
+    RESET : BOOL;   (* reset Q1 *)
+END_VAR
+VAR_OUTPUT
+    Q1 : BOOL;      (* keeps its value while both are FALSE *)
+END_VAR
+
+Q1 := SET1 OR (NOT RESET AND Q1);
+
+END_FUNCTION_BLOCK
+";
+
+const RS: &str = "FUNCTION_BLOCK RS
+VAR_INPUT
+    SET    : BOOL;  (* set Q1 *)
+    RESET1 : BOOL;  (* reset Q1; wins when both are TRUE *)
+END_VAR
+VAR_OUTPUT
+    Q1 : BOOL;      (* keeps its value while both are FALSE *)
+END_VAR
+
+Q1 := NOT RESET1 AND (SET OR Q1);
+
+END_FUNCTION_BLOCK
+";
+
 /// The ST definition of a standard block, with a header saying it is a reference.
 pub fn reference_source(kind: FbKind) -> String {
     let (clock, body) = match kind {
@@ -210,6 +278,9 @@ pub fn reference_source(kind: FbKind) -> String {
         FbKind::Ctd => ("", CTD),
         FbKind::RTrig => ("", R_TRIG),
         FbKind::FTrig => ("", F_TRIG),
+        FbKind::Ctud => ("", CTUD),
+        FbKind::Sr => ("", SR),
+        FbKind::Rs => ("", RS),
     };
     format!("{HEADER}{clock}\n{body}")
 }

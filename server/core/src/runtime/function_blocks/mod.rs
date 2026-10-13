@@ -1,11 +1,13 @@
 //! Behaviors of the IEC 61131-3 standard function blocks, one module each (`ton`, `tof`,
-//! `tp`, `ctu`, `ctd`, `edge`). An instance (`FbInstance`) owns the current value of every
+//! `tp`, `ctu`, `ctd`, `ctud`, `edge`, `bistable`). An instance (`FbInstance`) owns the current value of every
 //! member (`Io`) plus the behavior's private state, and all of it persists between scans.
 //! Inputs left out of a call keep their previous value, as IEC specifies. The interfaces
 //! (`FbKind`) belong to the compiler.
 
+mod bistable;
 mod ctd;
 mod ctu;
+mod ctud;
 mod edge;
 mod tof;
 mod ton;
@@ -44,6 +46,9 @@ impl FbKind {
             FbKind::Ctd => State::Ctd(ctd::Ctd::default()),
             FbKind::RTrig => State::RTrig(edge::RTrig::default()),
             FbKind::FTrig => State::FTrig(edge::FTrig::default()),
+            FbKind::Ctud => State::Ctud(ctud::Ctud::default()),
+            FbKind::Sr => State::Sr,
+            FbKind::Rs => State::Rs,
         };
         FbInstance { io: Io::new(self), state }
     }
@@ -119,6 +124,10 @@ enum State {
     Ctd(ctd::Ctd),
     RTrig(edge::RTrig),
     FTrig(edge::FTrig),
+    Ctud(ctud::Ctud),
+    /// The bistables keep their state in Q1 itself.
+    Sr,
+    Rs,
 }
 
 /// One declared instance, e.g. `RunTimer : TON;`.
@@ -156,6 +165,9 @@ impl FbInstance {
             State::Ctd(ctd) => ctd.execute(&mut self.io),
             State::RTrig(trig) => trig.execute(&mut self.io),
             State::FTrig(trig) => trig.execute(&mut self.io),
+            State::Ctud(ctud) => ctud.execute(&mut self.io),
+            State::Sr => bistable::sr(&mut self.io),
+            State::Rs => bistable::rs(&mut self.io),
         }
     }
 }

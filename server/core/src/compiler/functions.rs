@@ -25,6 +25,7 @@ pub enum StdFunction {
     Right,
     Mid,
     Find,
+    Move,
 }
 
 impl StdFunction {
@@ -49,6 +50,7 @@ impl StdFunction {
             "RIGHT" => StdFunction::Right,
             "MID" => StdFunction::Mid,
             "FIND" => StdFunction::Find,
+            "MOVE" => StdFunction::Move,
             _ => return None,
         };
         Some(function)
@@ -74,6 +76,7 @@ impl StdFunction {
             StdFunction::Right => "RIGHT",
             StdFunction::Mid => "MID",
             StdFunction::Find => "FIND",
+            StdFunction::Move => "MOVE",
         }
     }
 
@@ -107,6 +110,8 @@ impl StdFunction {
                 Ok(Value::real(x.sqrt(), data_type))
             }
             StdFunction::Sin => Ok(Value::real(real()?.sin(), data_type)),
+            // MOVE(x) is x: the assignment `y := MOVE(x);` copies it.
+            StdFunction::Move => Ok(first),
             StdFunction::Cos => Ok(Value::real(real()?.cos(), data_type)),
             StdFunction::Trunc => to_dint(self, real()?.trunc()),
             // Halves round away from zero: ROUND(2.5) = 3, ROUND(-2.5) = -3.

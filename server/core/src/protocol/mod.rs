@@ -73,14 +73,18 @@ pub enum Command {
     /// Set a simulated input: a digital one ("DI0") to true/false, an analog one ("AI0")
     /// to a number. Allowed in any state; the next scan reads it.
     SetInput { address: String, value: InputValue },
-    /// Set a BOOL variable that `program` declares.
-    SetVariable { program: String, name: String, value: bool },
+    /// Set a variable that `program` declares (or an element, e.g. "Levels[2]"): `true`,
+    /// a number or a text, converted to the variable's type.
+    SetVariable { program: String, name: String, value: Value },
     /// Replace every breakpoint.
     SetBreakpoints { breakpoints: Vec<Breakpoint> },
     /// Re-map the loaded project's I/O from its next scan; invalid mappings are refused
     /// with `IO_MAPPING_ERROR` (the current ones stay).
     ApplyIoMappings { mappings: Vec<Mapping> },
     GetState,
+    /// The SCADA tags from the tag database (answered with `ResponseData::tags`), or
+    /// `UNAVAILABLE` if the database isn't configured or can't be reached.
+    GetTags,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -122,11 +126,36 @@ pub struct Response {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResponseData {
     pub state: RuntimeState,
+    /// Only in the answer to GET_TAGS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<Tag>>,
+}
+
+/// A SCADA tag, as the tag database describes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tag {
+    pub name: String,
+    pub description: String,
+    /// The type the ST code sees: BOOL, or REAL for the (scaled) numbers.
+    pub st_type: DataType,
+    /// The type in the SCADA, e.g. "UInt16", "Float", "Boolean".
+    pub scada_type: String,
+    pub unit: String,
+    pub device: String,
+    pub protocol: String,
+    /// The address on the device, e.g. the Modbus register "40007".
+    pub address: String,
+    /// Engineering value = raw × scale_factor + scale_offset.
+    pub scale_factor: f64,
+    pub scale_offset: f64,
+    /// The SCADA's tag class (from `st_tags`).
+    pub tag_class: String,
 }
 
 impl Response {
     pub fn ok(id: RequestId, state: RuntimeState) -> Self {
-        Self { id: Some(id), result: Ok(ResponseData { state }) }
+        Self { id: Some(id), result: Ok(ResponseData { state, tags: None }) }
     }
 
     pub fn error(id: Option<RequestId>, error: ProtocolError) -> Self {

@@ -1,4 +1,4 @@
-//! CTD — down counter. LD loads CV from PV; each rising edge of CD counts CV down;
+//! CTD — down counter. LD (or LOAD) loads CV from PV; each rising edge of CD counts CV down;
 //! Q is CV <= 0.
 
 use super::Io;
@@ -17,7 +17,7 @@ impl Ctd {
         self.previous_cd = cd;
 
         let mut count = io.int("CV");
-        if io.bool("LD") {
+        if io.bool("LD") || io.bool("LOAD") {
             count = io.int("PV");
         } else if rising && count > i16::MIN {
             count -= 1;
