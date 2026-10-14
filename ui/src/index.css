@@ -38,11 +38,12 @@
   font-display: block;
 }
 
-/* One font everywhere (UI, panels, editor): JetBrains Mono Nerd Font, then plain
-   JetBrains Mono, then the old fallbacks. Tailwind's font-sans and font-mono both use it. */
+/* The interface (menus, panels, dialogs) uses the system's UI font, like VS Code. Code
+   (the editor, values in tables: font-mono) uses JetBrains Mono Nerd Font, which also has
+   the file icons' glyphs. */
 @theme {
   --font-app: "JetBrainsMono Nerd Font", "JetBrainsMono NF", "JetBrainsMono Nerd Font Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
-  --font-sans: var(--font-app);
+  --font-sans: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: var(--font-app);
 }
 

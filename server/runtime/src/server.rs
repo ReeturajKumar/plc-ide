@@ -252,7 +252,12 @@ pub fn serve(config: ServerConfig) -> ExitCode {
         }
     };
     let host = Arc::new(Host::new());
-    if crate::tags::configured() {
+    // Live tag values: pushed by the SCADA over a WebSocket if MYPLC_SCADA_URL is set,
+    // otherwise read from the tag database's data_log.
+    if let Some(url) = crate::tags::scada_url() {
+        let host = Arc::clone(&host);
+        thread::spawn(move || crate::tags::listen(&url, host));
+    } else if crate::tags::configured() {
         let host = Arc::clone(&host);
         thread::spawn(move || crate::tags::poll(host));
     }

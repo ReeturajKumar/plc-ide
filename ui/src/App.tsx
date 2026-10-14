@@ -4,6 +4,8 @@ import Workspace from "./pages/Workspace/Workspace";
 import NewProjectDialog from "./components/dialogs/NewProjectDialog";
 import ConfirmDialog from "./components/dialogs/ConfirmDialog";
 import InputsDialog from "./components/dialogs/InputsDialog";
+import SettingsDialog from "./components/dialogs/SettingsDialog";
+import { useAutoSave } from "./hooks/useAutoSave";
 import Notifications from "./components/common/Notifications";
 import { useProjectStore } from "./store/projectStore";
 import { useUIStore } from "./store/uiStore";
@@ -15,6 +17,7 @@ function App() {
     const activeDialog = useUIStore((s) => s.activeDialog);
     useKeyboardShortcuts();
     useCloseGuard();
+    useAutoSave();
 
     return (
         <>
@@ -22,6 +25,7 @@ function App() {
 
             {/* Global overlays */}
             {activeDialog === "newProject" && <NewProjectDialog />}
+            {activeDialog === "settings" && <SettingsDialog />}
             <ConfirmDialog />
             <InputsDialog />
             <Notifications />

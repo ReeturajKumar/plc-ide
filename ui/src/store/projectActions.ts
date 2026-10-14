@@ -205,7 +205,7 @@ export async function saveActive(): Promise<boolean> {
     if (!isDirty(active) || isBuiltinPath(active.path)) return true;
     try {
         await fsApi.writeFile(project.rootPath, active.path, active.content);
-        editor.markFileSaved(active.path);
+        editor.markFileSaved(active.path, active.content);
         void checkIoMappings(); // drops mappings to variables the change removed
         return true;
     } catch (e) {
@@ -215,6 +215,19 @@ export async function saveActive(): Promise<boolean> {
 
 /** Save every dirty open tab. */
 export async function saveAll(): Promise<boolean> {
+    if (!(await writeDirtyFiles())) return false;
+    void checkIoMappings(); // drops mappings to variables the change removed
+    return true;
+}
+
+/**
+ * Auto save: write every dirty tab, nothing more. It runs while you type, so it leaves
+ * the I/O mapping cleanup (which removes mappings of deleted variables) to real saves,
+ * compiles and runs: a half-typed rename mustn't lose a mapping.
+ */
+export const autoSave = () => writeDirtyFiles();
+
+async function writeDirtyFiles(): Promise<boolean> {
     const { project } = useProjectStore.getState();
     const editor = useEditorStore.getState();
     if (!project) return false;
@@ -222,12 +235,11 @@ export async function saveAll(): Promise<boolean> {
         if (!isDirty(f) || isBuiltinPath(f.path)) continue;
         try {
             await fsApi.writeFile(project.rootPath, f.path, f.content);
-            editor.markFileSaved(f.path);
+            editor.markFileSaved(f.path, f.content);
         } catch (e) {
             return fail(e);
         }
     }
-    void checkIoMappings(); // drops mappings to variables the change removed
     return true;
 }
 

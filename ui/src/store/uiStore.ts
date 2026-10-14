@@ -7,7 +7,7 @@ export interface Notification {
     message: string;
 }
 
-export type DialogKind = "newProject" | null;
+export type DialogKind = "newProject" | "settings" | null;
 
 /** An inline name edit in the Explorer: a new program, or renaming an existing one. */
 export type ExplorerEdit =
@@ -31,6 +31,13 @@ const EXPLORER_KEY = "myplc.explorerWidth";
 const PANEL_KEY = "myplc.panelHeight";
 const WRAP_KEY = "myplc.wordWrap";
 const MINIMAP_KEY = "myplc.minimap";
+const AUTOSAVE_KEY = "myplc.autoSave";
+const AUTOSAVE_DELAY_KEY = "myplc.autoSaveDelay";
+
+/** Auto save delay limits, in milliseconds. */
+export const AUTOSAVE_DELAY_MIN = 200;
+export const AUTOSAVE_DELAY_MAX = 600_000;
+export const clampAutoSaveDelay = (ms: number) => Math.round(Math.max(AUTOSAVE_DELAY_MIN, Math.min(AUTOSAVE_DELAY_MAX, ms)));
 
 const readFlag = (key: string, fallback: boolean) => {
     try {
@@ -68,6 +75,9 @@ interface UIState {
     /** Editor view options, remembered per machine. */
     wordWrap: boolean;
     minimap: boolean;
+    /** Save changed files by themselves, `autoSaveDelay` ms after the last edit. */
+    autoSave: boolean;
+    autoSaveDelay: number;
     activeDialog: DialogKind;
     explorerEdit: ExplorerEdit | null;
     /** Path of the selected Explorer item; new files and folders go next to or into it. */
@@ -82,6 +92,8 @@ interface UIState {
     togglePanelMaximized: () => void;
     toggleWordWrap: () => void;
     toggleMinimap: () => void;
+    setAutoSave: (on: boolean) => void;
+    setAutoSaveDelay: (ms: number) => void;
     setPanelHeight: (height: number) => void;
     setPanelTab: (tab: PanelTab) => void;
     openDialog: (dialog: DialogKind) => void;
@@ -118,6 +130,8 @@ export const useUIStore = create<UIState>((set) => ({
     panelTab: "problems",
     wordWrap: readFlag(WRAP_KEY, false),
     minimap: readFlag(MINIMAP_KEY, true),
+    autoSave: readFlag(AUTOSAVE_KEY, false),
+    autoSaveDelay: readStored(AUTOSAVE_DELAY_KEY, 1000, clampAutoSaveDelay),
     activeDialog: null,
     explorerEdit: null,
     explorerSelection: null,
@@ -146,6 +160,15 @@ export const useUIStore = create<UIState>((set) => ({
             storeFlag(MINIMAP_KEY, !s.minimap);
             return { minimap: !s.minimap };
         }),
+    setAutoSave: (on) => {
+        storeFlag(AUTOSAVE_KEY, on);
+        set({ autoSave: on });
+    },
+    setAutoSaveDelay: (ms) => {
+        const delay = clampAutoSaveDelay(ms);
+        try { localStorage.setItem(AUTOSAVE_DELAY_KEY, String(delay)); } catch { /* ignore */ }
+        set({ autoSaveDelay: delay });
+    },
     setPanelHeight: (height) => {
         const h = clampHeight(height);
         try { localStorage.setItem(PANEL_KEY, String(h)); } catch { /* ignore */ }

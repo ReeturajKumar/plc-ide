@@ -49,6 +49,8 @@ const Header = () => {
                 { label: "Save All", onClick: () => void saveAll(), disabled: !hasProject },
                 { separator: true, label: "" },
                 { label: "Close Project", onClick: () => void closeProject(), disabled: !hasProject },
+                { separator: true, label: "" },
+                { label: "Settings…", shortcut: "Ctrl+,", onClick: () => openDialog("settings") },
             ],
         },
         {

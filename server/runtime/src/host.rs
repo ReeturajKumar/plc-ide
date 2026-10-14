@@ -4,6 +4,7 @@
 //! itself (scan cycle, debugger, function blocks) is `myplc_core`'s `Runtime`; this only
 //! decides when it scans.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
@@ -36,9 +37,9 @@ struct Inner {
     generation: u64,
     /// Told about every finished scan (see `Host::on_scan`).
     observer: Option<ScanObserver>,
-    /// The latest SCADA tag values (see `Host::set_tag_values`), also given to the next
-    /// project loaded.
-    tag_values: Vec<(String, f64)>,
+    /// The latest SCADA tag values by name (see `Host::set_tag_values`), also given to the
+    /// next project loaded.
+    tag_values: HashMap<String, f64>,
 }
 
 /// Sees the state after each scan that completed or failed; returning false asks the host
@@ -126,7 +127,7 @@ impl Host {
                 breakpoints: Vec::new(),
                 generation: 0,
                 observer: None,
-                tag_values: Vec::new(),
+                tag_values: HashMap::new(),
             })),
         }
     }
@@ -135,7 +136,8 @@ impl Host {
         lock(&self.inner).state()
     }
 
-    /// The latest SCADA tag values (name, value); programs see them from the next scan.
+    /// New values for some SCADA tags (name, value); programs see them from the next scan.
+    /// Tags not given keep their value.
     pub fn set_tag_values(&self, values: Vec<(String, f64)>) {
         let mut inner = lock(&self.inner);
         if let Some(runtime) = inner.runtime.as_mut() {
@@ -143,7 +145,7 @@ impl Host {
                 runtime.set_tag(name, *value);
             }
         }
-        inner.tag_values = values;
+        inner.tag_values.extend(values);
     }
 
     /// Watch every scan as it finishes (e.g. to trace it, or to end a run after N scans).

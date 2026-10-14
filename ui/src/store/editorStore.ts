@@ -14,7 +14,8 @@ interface EditorState {
     closeWithin: (path: string) => void;
     setActive: (path: string) => void;
     updateContent: (path: string, content: string) => void;
-    markFileSaved: (path: string) => void;
+    /** `content` (what was written to disk; default: the tab's current text) is now saved. */
+    markFileSaved: (path: string, content?: string) => void;
     /** Follow a rename of a file or folder: tabs (and unsaved edits) move with it. */
     remapPaths: (from: string, to: string) => void;
     setCursor: (line: number, col: number) => void;
@@ -54,8 +55,8 @@ export const useEditorStore = create<EditorState>((set) => ({
     updateContent: (path, content) =>
         set((s) => ({ openFiles: s.openFiles.map((f) => (f.path === path ? { ...f, content } : f)) })),
 
-    markFileSaved: (path) =>
-        set((s) => ({ openFiles: s.openFiles.map((f) => (f.path === path ? { ...f, savedContent: f.content } : f)) })),
+    markFileSaved: (path, content) =>
+        set((s) => ({ openFiles: s.openFiles.map((f) => (f.path === path ? { ...f, savedContent: content ?? f.content } : f)) })),
 
     remapPaths: (from, to) =>
         set((s) => ({

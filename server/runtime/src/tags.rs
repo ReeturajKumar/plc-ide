@@ -1,12 +1,15 @@
 //! The SCADA tag database (PostgreSQL): the tag list from `st_tags` (see
-//! `server/sql/st_tags.sql`; details from `scada_master_tags`), and their live values from
-//! `data_log` (`poll`).
+//! `server/sql/st_tags.sql`), the type names from `control_table` (group 5: 54 Binary,
+//! 57 Float ABCD, …), and details from `scada_master_tags` where it has the tag. Live values come from the
+//! SCADA's WebSocket if `MYPLC_SCADA_URL` is set (`listen`; `mock-scada/` stands in for
+//! it), otherwise from `data_log` (`poll`).
 //!
 //! Connection settings come from the environment, so changing them needs no code change:
 //! `MYPLC_DB_HOST` (default localhost), `MYPLC_DB_PORT` (5432), `MYPLC_DB_NAME`,
 //! `MYPLC_DB_USER`, `MYPLC_DB_PASSWORD`. A `.env` file in the working folder is read at
 //! start (see `load_env_file`); real environment variables win over it.
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::sync::Arc;
@@ -93,6 +96,90 @@ pub fn poll(host: Arc<Host>) {
     }
 }
 
+/// The SCADA's WebSocket (`MYPLC_SCADA_URL`, e.g. ws://127.0.0.1:6000), if set.
+pub fn scada_url() -> Option<String> {
+    env::var("MYPLC_SCADA_URL").ok().filter(|v| !v.is_empty())
+}
+
+/// Tag ID (`st_tags.tagid`) → tag name, for the SCADA's messages.
+fn names_by_id() -> Result<HashMap<String, String>, String> {
+    let rows = connect()?
+        .query("SELECT tagid::text, tag_name FROM st_tags WHERE tagid IS NOT NULL", &[])
+        .map_err(|e| format!("Can't read st_tags: {e}"))?;
+    Ok(rows.iter().map(|row| (row.get::<_, String>(0).to_lowercase(), row.get(1))).collect())
+}
+
+/// One `ScriptTagValues` message → (tag name, value) for the tags known in `names`; the
+/// IDs it didn't know. Other messages give nothing.
+// ponytail: values are taken as engineering values; apply scale_factor here if the SCADA
+// turns out to send raw register values.
+fn tag_values(text: &str, names: &HashMap<String, String>) -> (Vec<(String, f64)>, Vec<String>) {
+    let Ok(message) = serde_json::from_str::<serde_json::Value>(text) else { return Default::default() };
+    if message["type"] != "ScriptTagValues" {
+        return Default::default();
+    }
+    let (mut values, mut unknown) = (Vec::new(), Vec::new());
+    for tag in message["tags"].as_array().into_iter().flatten() {
+        let id = tag["tag_id"].as_str().unwrap_or_default().to_lowercase();
+        let value = tag["value"].as_f64().or_else(|| tag["value"].as_bool().map(f64::from));
+        match (names.get(&id), value) {
+            (Some(name), Some(value)) => values.push((name.clone(), value)),
+            _ => unknown.push(id),
+        }
+    }
+    (values, unknown)
+}
+
+/// Forever: receive the SCADA's tag values over its WebSocket at `url` and give them to
+/// `host`. Reconnects (every 2 s) if the connection drops; tags keep their last values.
+pub fn listen(url: &str, host: Arc<Host>) {
+    let mut last_error = String::new();
+    let mut report = |e: String| {
+        if e != last_error {
+            eprintln!("[scada] {e} (tags keep their last values; retrying)");
+            last_error = e;
+        }
+    };
+    loop {
+        // Fresh names on every connection: tags may have been added meanwhile.
+        let names = match names_by_id() {
+            Ok(names) => names,
+            Err(e) => {
+                report(e);
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+        };
+        match tungstenite::connect(url) {
+            Ok((mut ws, _)) => {
+                eprintln!("[scada] connected to {url} ({} tags known)", names.len());
+                let mut warned = false;
+                loop {
+                    match ws.read() {
+                        Ok(tungstenite::Message::Text(text)) => {
+                            let (values, unknown) = tag_values(&text, &names);
+                            if !unknown.is_empty() && !warned {
+                                eprintln!("[scada] tag IDs not in st_tags (ignored): {}", unknown.join(", "));
+                                warned = true;
+                            }
+                            if !values.is_empty() {
+                                host.set_tag_values(values);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            report(format!("connection to {url} lost: {e}"));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => report(format!("can't connect to {url}: {e}")),
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+}
+
 /// Each tag's newest value in `data_log`.
 // ponytail: DISTINCT ON scans data_log; add an index on (tag_name, cdttime) when it grows.
 fn latest_values(client: &mut Client) -> Result<Vec<(String, f64)>, String> {
@@ -111,13 +198,14 @@ pub fn load() -> Result<Vec<Tag>, String> {
     let mut client = connect()?;
     let rows = client
         .query(
-            "SELECT st.tag_name, coalesce(s.description, ''), coalesce(s.data_type, ''), coalesce(s.engineering_unit, ''),
+            "SELECT st.tag_name, coalesce(s.description, ''), coalesce(c.tag, st.data_type, ''), coalesce(t.unit, s.engineering_unit, ''),
                     coalesce(s.device_name, ''), coalesce(s.protocol_type, ''), coalesce(s.protocol_address, ''),
                     coalesce(s.scale_factor, 1)::float8, coalesce(s.scale_offset, 0)::float8, coalesce(st.tag_class, '')
              FROM st_tags st
              JOIN tagmast t ON t.id = st.id
-             LEFT JOIN scada_master_tags s ON s.source_tag_id = t.uuid::text
-             WHERE s.is_enabled IS NOT FALSE
+             LEFT JOIN scada_master_tags s ON s.tag_name = st.tag_name
+             LEFT JOIN control_table c ON c.code = 5 AND c.id::text = st.data_type
+             WHERE st.tag_name IS NOT NULL AND s.is_enabled IS NOT FALSE
              ORDER BY st.id",
             &[],
         )
@@ -125,12 +213,14 @@ pub fn load() -> Result<Vec<Tag>, String> {
     Ok(rows
         .iter()
         .map(|row| {
+            // control_table's name for the type ("Binary", "Float ABCD", "Signed", …).
             let scada_type: String = row.get(2);
+            let boolean = ["binary", "boolean"].iter().any(|b| scada_type.eq_ignore_ascii_case(b));
             Tag {
                 name: row.get(0),
                 description: row.get(1),
                 // Numbers are engineering values after scaling (×0.1 etc.), so REAL.
-                st_type: if scada_type.eq_ignore_ascii_case("boolean") { DataType::Bool } else { DataType::Real },
+                st_type: if boolean { DataType::Bool } else { DataType::Real },
                 scada_type,
                 unit: row.get(3),
                 device: row.get(4),

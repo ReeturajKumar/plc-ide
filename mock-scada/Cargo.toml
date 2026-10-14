@@ -1,0 +1,10 @@
+[package]
+name = "mock-scada"
+version = "0.1.0"
+description = "Stands in for the SCADA while testing: sends live tag values (ScriptTagValues) over a WebSocket"
+edition = "2021"
+
+[dependencies]
+postgres = "0.19"
+serde_json = "1"
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }

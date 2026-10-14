@@ -7,6 +7,15 @@ Server run   : cd server && cargo run -- --listen 127.0.0.1:5020
 Server build : cd server && cargo build --release
 ```
 
+## Mock SCADA (live tag values for testing)
+
+```
+Run          : cd mock-scada && cargo run
+```
+
+The backend connects to `MYPLC_SCADA_URL` in `server/.env` (`ws://127.0.0.1:6000` = the mock).
+Put the real system's address there later.
+
 ## Deployed (Render)
 
 ```

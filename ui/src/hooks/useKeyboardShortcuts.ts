@@ -7,7 +7,7 @@ import { useEditorStore } from "../store/editorStore";
 
 /**
  * Global shortcuts.
- * File:  Ctrl/Cmd + S save · + O open · + N new
+ * File:  Ctrl/Cmd + S save · + O open · + N new · + , settings
  * PLC:   F5 run / resume · Shift+F5 stop · F7 compile all · Ctrl+F7 compile
  * Debug: F9 toggle breakpoint · F10 step scan · F11 step statement (both while paused)
  * Panel (VS Code style):
@@ -70,7 +70,10 @@ export function useKeyboardShortcuts(): void {
                 return;
             }
 
-            if (key === "s") {
+            if (key === ",") {
+                e.preventDefault();
+                ui.openDialog("settings");
+            } else if (key === "s") {
                 e.preventDefault();
                 void saveActive();
             } else if (key === "o") {
