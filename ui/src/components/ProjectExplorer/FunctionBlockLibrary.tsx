@@ -43,6 +43,9 @@ async function openDefinition(fb: FbSummary): Promise<void> {
 
 const LibraryItem = ({ fb }: { fb: FbSummary }) => {
     const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+    // Standard blocks are drag/insert only — their built-in source is hidden. Project
+    // blocks keep Go to Definition, since that opens the user's own code.
+    const canSeeDef = fb.source === null;
     const insert = () => {
         const problem = insertFunctionBlock(fb);
         if (problem) useUIStore.getState().notify("info", problem);
@@ -65,14 +68,14 @@ const LibraryItem = ({ fb }: { fb: FbSummary }) => {
             onContextMenu={showMenu}
             onKeyDown={(e) => {
                 if (e.key === "Enter") insert();
-                else if (e.key === "F12") void openDefinition(fb);
+                else if (e.key === "F12" && canSeeDef) void openDefinition(fb);
             }}
             title={[
                 `${fb.name}`,
                 `Inputs: ${fb.inputs.map((v) => `${v.name} : ${v.dataType}`).join(", ") || "none"}`,
                 `Outputs: ${fb.outputs.map((v) => `${v.name} : ${v.dataType}`).join(", ") || "none"}`,
                 "Drag into the editor, or double-click to insert at the cursor.",
-                "Click { } (or press F12) to see its definition.",
+                ...(canSeeDef ? ["Click { } (or press F12) to see its definition."] : []),
             ].join("\n")}
             className="group flex items-center gap-1.5 py-0.5 pl-3 pr-1 cursor-grab active:cursor-grabbing hover:bg-[var(--theme-bg-hover)] focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--theme-border-focus)]"
         >
@@ -81,18 +84,20 @@ const LibraryItem = ({ fb }: { fb: FbSummary }) => {
             <span className="flex-1 truncate text-[11px] text-[var(--theme-text-muted)]">
                 {names(fb.inputs)} → {names(fb.outputs)}
             </span>
-            <button
-                onClick={(e) => {
-                    e.stopPropagation();
-                    void openDefinition(fb);
-                }}
-                onDoubleClick={(e) => e.stopPropagation()}
-                title={fb.source !== null ? "Show Definition (read-only)" : "Go to Definition"}
-                aria-label={`Show the definition of ${fb.name}`}
-                className="shrink-0 px-1 rounded text-[10px] font-semibold text-[var(--theme-text-muted)] opacity-60 group-hover:opacity-100 hover:text-[var(--theme-text-primary)] hover:bg-[var(--theme-bg-hover)] cursor-pointer"
-            >
-                {"{ }"}
-            </button>
+            {canSeeDef && (
+                <button
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        void openDefinition(fb);
+                    }}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    title="Go to Definition"
+                    aria-label={`Show the definition of ${fb.name}`}
+                    className="shrink-0 px-1 rounded text-[10px] font-semibold text-[var(--theme-text-muted)] opacity-60 group-hover:opacity-100 hover:text-[var(--theme-text-primary)] hover:bg-[var(--theme-bg-hover)] cursor-pointer"
+                >
+                    {"{ }"}
+                </button>
+            )}
         </div>
         {menu && (
             <ContextMenu
@@ -101,7 +106,9 @@ const LibraryItem = ({ fb }: { fb: FbSummary }) => {
                 onClose={() => setMenu(null)}
                 items={[
                     { label: "Insert into Editor", shortcut: "Enter", onClick: insert },
-                    { label: fb.source !== null ? "Show Definition" : "Go to Definition", shortcut: "F12", onClick: () => void openDefinition(fb) },
+                    ...(canSeeDef
+                        ? [{ label: "Go to Definition", shortcut: "F12", onClick: () => void openDefinition(fb) }]
+                        : []),
                 ]}
             />
         )}
