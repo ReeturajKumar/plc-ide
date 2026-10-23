@@ -7,7 +7,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
+use std::sync::atomic::Ordering::Relaxed;
+use std::time::{Duration, Instant};
+
+use crate::metrics;
 
 use myplc_core::compiler::project::{ProgramSource, ProjectContext};
 use myplc_core::io::{self, IoImage, Mapping};
@@ -246,6 +249,7 @@ impl Host {
 
     fn spawn_scan_loop(&self, generation: u64) -> std::io::Result<()> {
         let inner = Arc::clone(&self.inner);
+        let mut last_start: Option<Instant> = None;
         let scan_loop = move || loop {
             // One scan = READ INPUTS → EXECUTE → UPDATE OUTPUTS, under the lock, so every
             // scan sees a consistent input image and commands never see half a scan.
@@ -255,8 +259,14 @@ impl Host {
                     return;
                 }
                 if state.status == RuntimeStatus::Running {
+                    let start = Instant::now();
                     let stop = state.breakpoint_stop();
-                    if !state.scan(stop) {
+                    let can_scan = state.scan(stop);
+                    let period = last_start.map_or(0, |last| start.duration_since(last).as_micros() as u64);
+                    metrics::record_scan(start.elapsed().as_micros() as u64, period);
+                    metrics::SCAN_TIME_MS.store(state.scan_time_ms, Relaxed);
+                    last_start = Some(start);
+                    if !can_scan {
                         return;
                     }
                 }

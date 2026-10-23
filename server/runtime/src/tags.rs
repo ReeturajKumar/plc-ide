@@ -12,11 +12,13 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use crate::host::Host;
+use crate::metrics;
 
 use myplc_core::compiler::ast::DataType;
 use myplc_core::protocol::Tag;
@@ -109,19 +111,25 @@ fn names_by_id() -> Result<HashMap<String, String>, String> {
     Ok(rows.iter().map(|row| (row.get::<_, String>(0).to_lowercase(), row.get(1))).collect())
 }
 
-/// One `ScriptTagValues` message → (tag name, value) for the tags known in `names`; the
-/// IDs it didn't know. Other messages give nothing.
+/// One SCADA message → (tag name, value) for the tags known in `names`; the IDs it didn't
+/// know. Two formats: `{"type":"st_tags","tags":[{"tag_id","value"}]}` (or the older
+/// `"type":"ScriptTagValues"`)
+/// and a screen's `{"screen_id":23,"data":[{"TagID","Value"}]}`. Other messages give nothing.
 // ponytail: values are taken as engineering values; apply scale_factor here if the SCADA
 // turns out to send raw register values.
 fn tag_values(text: &str, names: &HashMap<String, String>) -> (Vec<(String, f64)>, Vec<String>) {
     let Ok(message) = serde_json::from_str::<serde_json::Value>(text) else { return Default::default() };
-    if message["type"] != "ScriptTagValues" {
+    let (tags, id_key, value_key) = if message["type"] == "st_tags" || message["type"] == "ScriptTagValues" {
+        (&message["tags"], "tag_id", "value")
+    } else if !message["screen_id"].is_null() {
+        (&message["data"], "TagID", "Value")
+    } else {
         return Default::default();
-    }
+    };
     let (mut values, mut unknown) = (Vec::new(), Vec::new());
-    for tag in message["tags"].as_array().into_iter().flatten() {
-        let id = tag["tag_id"].as_str().unwrap_or_default().to_lowercase();
-        let value = tag["value"].as_f64().or_else(|| tag["value"].as_bool().map(f64::from));
+    for tag in tags.as_array().into_iter().flatten() {
+        let id = tag[id_key].as_str().unwrap_or_default().to_lowercase();
+        let value = tag[value_key].as_f64().or_else(|| tag[value_key].as_bool().map(f64::from));
         match (names.get(&id), value) {
             (Some(name), Some(value)) => values.push((name.clone(), value)),
             _ => unknown.push(id),
@@ -153,11 +161,17 @@ pub fn listen(url: &str, host: Arc<Host>) {
         match tungstenite::connect(url) {
             Ok((mut ws, _)) => {
                 eprintln!("[scada] connected to {url} ({} tags known)", names.len());
+                metrics::SCADA_CONNECTED.store(1, Relaxed);
                 let mut warned = false;
                 loop {
                     match ws.read() {
                         Ok(tungstenite::Message::Text(text)) => {
+                            let start = std::time::Instant::now();
                             let (values, unknown) = tag_values(&text, &names);
+                            metrics::SCADA_MESSAGES.fetch_add(1, Relaxed);
+                            metrics::SCADA_LAST_MS.store(metrics::now_ms(), Relaxed);
+                            metrics::SCADA_VALUES.fetch_add(values.len() as u64, Relaxed);
+                            metrics::SCADA_UNKNOWN.fetch_add(unknown.len() as u64, Relaxed);
                             if !unknown.is_empty() && !warned {
                                 eprintln!("[scada] tag IDs not in st_tags (ignored): {}", unknown.join(", "));
                                 warned = true;
@@ -165,9 +179,12 @@ pub fn listen(url: &str, host: Arc<Host>) {
                             if !values.is_empty() {
                                 host.set_tag_values(values);
                             }
+                            metrics::SCADA_PROCESS_US.store(start.elapsed().as_micros() as u64, Relaxed);
                         }
                         Ok(_) => {}
                         Err(e) => {
+                            metrics::SCADA_CONNECTED.store(0, Relaxed);
+                            metrics::SCADA_RECONNECTS.fetch_add(1, Relaxed);
                             report(format!("connection to {url} lost: {e}"));
                             break;
                         }
@@ -232,4 +249,21 @@ pub fn load() -> Result<Vec<Tag>, String> {
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_script_and_screen_messages() {
+        let names = HashMap::from([("abc".to_string(), "T1".to_string())]);
+        let script = r#"{"type":"ScriptTagValues","script_id":"117","tags":[{"tag_id":"ABC","register_address":5,"value":1.5},{"tag_id":"zzz","value":2}]}"#;
+        assert_eq!(tag_values(script, &names), (vec![("T1".to_string(), 1.5)], vec!["zzz".to_string()]));
+        let st = r#"{"type":"st_tags","tags":[{"tag_id":"abc","value":true}]}"#;
+        assert_eq!(tag_values(st, &names), (vec![("T1".to_string(), 1.0)], vec![]));
+        let screen =r#"{"screen_name":"Screen 23","screen_id":23,"data":[{"TagID":"abc","RegAddress":633,"FunctionType":"HoldingRegister","Value":9407.000000}]}"#;
+        assert_eq!(tag_values(screen, &names), (vec![("T1".to_string(), 9407.0)], vec![]));
+        assert_eq!(tag_values(r#"{"hello":1}"#, &names), Default::default());
+    }
 }

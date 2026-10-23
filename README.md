@@ -16,6 +16,15 @@ Run          : cd mock-scada && cargo run
 The backend connects to `MYPLC_SCADA_URL` in `server/.env` (`ws://127.0.0.1:6000` = the mock).
 Put the real system's address there later.
 
+## Monitoring (Prometheus + Grafana)
+
+The server shows its live numbers (scan time, jitter, SCADA messages and latency) at `http://127.0.0.1:5020/metrics`. Full guide: [MONITORING.md](MONITORING.md).
+
+```
+Prometheus : prometheus.exe --config.file=monitoring/prometheus.yml   (http://localhost:9090)
+Grafana    : add data source Prometheus http://localhost:9090, then Dashboards > Import > monitoring/grafana-dashboard.json   (http://localhost:3000)
+```
+
 ## Deployed (Render)
 
 ```

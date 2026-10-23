@@ -34,6 +34,7 @@ use myplc_core::io::{self, InputValue, IoKind, Mapping};
 use myplc_core::protocol::{self, ErrorCode, ProtocolError, RuntimeState};
 
 mod host;
+mod metrics;
 mod server;
 mod tags;
 
@@ -59,7 +60,22 @@ fn server_config(mut args: impl Iterator<Item = String>) -> Result<server::Serve
     if config.listen.is_empty() {
         return Err("--listen needs an address, e.g. 0.0.0.0:5020".into());
     }
+    // R1: a network-reachable runtime with no token lets anyone who can reach the port load
+    // programs, RUN or STOP the PLC. Loopback is this machine only, so a token isn't forced
+    // there; any other address requires one.
+    if config.token.is_none() && !is_loopback(&config.listen) {
+        return Err(format!(
+            "{} is reachable from the network, so a token is required: pass --token <secret>, set MYPLC_TOKEN, or listen on 127.0.0.1 for this PC only",
+            config.listen
+        ));
+    }
     Ok(config)
+}
+
+/// Whether `listen` only accepts connections from this machine (so no token is forced).
+fn is_loopback(listen: &str) -> bool {
+    let host = listen.rsplit_once(':').map_or(listen, |(h, _)| h).trim_matches(['[', ']']);
+    host == "localhost" || host == "::1" || host.strip_prefix("127.").is_some()
 }
 
 /// Where the I/O comes from. Only the simulated I/O exists for now.
@@ -331,3 +347,31 @@ fn main() -> ExitCode {
     }
 }
 
+
+#[cfg(test)]
+mod r1_tests {
+    use super::*;
+
+    fn config(args: &[&str]) -> Result<server::ServerConfig, String> {
+        // MYPLC_TOKEN must be unset for these to test the no-token path.
+        std::env::remove_var("MYPLC_TOKEN");
+        server_config(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn loopback_detection() {
+        assert!(is_loopback("127.0.0.1:5020"));
+        assert!(is_loopback("localhost:5020"));
+        assert!(is_loopback("[::1]:5020"));
+        assert!(!is_loopback("0.0.0.0:5020"));
+        assert!(!is_loopback("192.168.1.203:5020"));
+    }
+
+    #[test]
+    fn network_address_needs_a_token() {
+        assert!(config(&["--listen", "0.0.0.0:5020"]).is_err());
+        assert!(config(&["--listen", "192.168.1.203:5020"]).is_err());
+        assert!(config(&["--listen", "127.0.0.1:5020"]).is_ok());
+        assert!(config(&["--listen", "0.0.0.0:5020", "--token", "secret"]).is_ok());
+    }
+}

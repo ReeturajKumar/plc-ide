@@ -8,7 +8,8 @@
 //! - The loaded project and the RUN/STOP mode are saved in the data folder, so after a
 //!   restart (crash, reboot) the same project is loaded and, if it was running, runs again.
 //! - With a token (`--token` or `MYPLC_TOKEN`), clients must connect to `ws://<addr>/?token=…`.
-//! - Plain HTTP requests (hosting platforms' health checks) get `200 OK`, not a refusal.
+//! - Plain HTTP requests (hosting platforms' health checks) get `200 OK`, not a refusal;
+//!   `GET /metrics` gets the runtime's live numbers for Prometheus (see `metrics`).
 
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -24,7 +25,8 @@ use tungstenite::handshake::server::{ErrorResponse, Request as HttpRequest, Resp
 use tungstenite::{Error as WsError, Message, WebSocket};
 
 use crate::host::Host;
-use myplc_core::protocol::{Command, ErrorCode, ProtocolError, Request, Response, ResponseData, RuntimeMessage, RuntimeState};
+use crate::metrics;
+use myplc_core::protocol::{Command, ErrorCode, ProtocolError, Request, Response, ResponseData, RuntimeMessage, RuntimeState, RuntimeStatus};
 use myplc_core::ENGINE_STACK_BYTES;
 
 /// How long a connection waits for a request before checking the state for an update.
@@ -134,8 +136,9 @@ fn send(ws: &mut WebSocket<TcpStream>, message: &RuntimeMessage) -> Result<(), W
 enum Visitor {
     /// A WebSocket upgrade: an IDE.
     WebSocket,
-    /// A plain HTTP request, e.g. a health check; `head` for a HEAD request.
-    Http { head: bool },
+    /// A plain HTTP request, e.g. a health check; `head` for a HEAD request, `metrics`
+    /// for `/metrics`.
+    Http { head: bool, metrics: bool },
     /// Nothing usable (a port scan, or a client that went away).
     Nothing,
 }
@@ -154,7 +157,8 @@ fn visitor(stream: &TcpStream) -> Visitor {
                 // The request line and headers are complete (or too long to matter).
                 if request.contains("\r\n\r\n") || n == buf.len() {
                     let upgrade = request.lines().any(|line| line.starts_with("upgrade:") && line.contains("websocket"));
-                    return if upgrade { Visitor::WebSocket } else { Visitor::Http { head: request.starts_with("head ") } };
+                    let metrics = request.split(' ').nth(1).is_some_and(|path| path.starts_with("/metrics"));
+                    return if upgrade { Visitor::WebSocket } else { Visitor::Http { head: request.starts_with("head "), metrics } };
                 }
             }
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
@@ -167,12 +171,14 @@ fn visitor(stream: &TcpStream) -> Visitor {
     }
 }
 
-/// A health check: `200 OK`, then close.
-fn answer_http(mut stream: TcpStream, head: bool) {
+/// A health check (`200 OK`) or the metrics, then close.
+fn answer_http(mut stream: TcpStream, head: bool, body: String) {
     let mut request = [0u8; 8192];
     let _ = stream.read(&mut request); // consume it, so closing doesn't reset the connection
-    let body = if head { "" } else { "ok\n" };
-    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{body}");
+    let length = body.len();
+    let body = if head { "" } else { &body };
+    // nosniff: these endpoints return plain text; stop a browser from guessing another type.
+    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}");
     let _ = stream.write_all(response.as_bytes());
 }
 
@@ -182,7 +188,12 @@ fn serve_client(stream: TcpStream, host: &Host, saved: &Saved, token: Option<&st
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     match visitor(&stream) {
         Visitor::WebSocket => {}
-        Visitor::Http { head } => return answer_http(stream, head),
+        Visitor::Http { head, metrics: false } => return answer_http(stream, head, "ok
+".into()),
+        Visitor::Http { head, metrics: true } => {
+            let running = host.state().status == RuntimeStatus::Running;
+            return answer_http(stream, head, metrics::render(running));
+        }
         Visitor::Nothing => return,
     }
     if stream.set_read_timeout(None).is_err() {
@@ -211,6 +222,7 @@ fn serve_client(stream: TcpStream, host: &Host, saved: &Saved, token: Option<&st
         return;
     }
     eprintln!("[runtime] client connected: {peer}");
+    metrics::CLIENTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut last_sent: Option<RuntimeState> = None;
     loop {
         match ws.read() {
@@ -240,6 +252,7 @@ fn serve_client(stream: TcpStream, host: &Host, saved: &Saved, token: Option<&st
             last_sent = Some(state);
         }
     }
+    metrics::CLIENTS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     eprintln!("[runtime] client left: {peer} (the PLC keeps its state and mode)");
 }
 
@@ -265,10 +278,8 @@ pub fn serve(config: ServerConfig) -> ExitCode {
     saved.restore(&host);
     let token: Option<Arc<str>> = config.token.map(Into::into);
     eprintln!(
-        "[runtime] listening on ws://{} (data: {}{})",
+        "[runtime] listening on ws://{}",
         config.listen,
-        config.data_dir.display(),
-        if token.is_some() { ", token required" } else { ", no token: anyone who can reach this port controls the PLC" }
     );
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
