@@ -105,7 +105,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let address = setting("MOCK_SCADA_LISTEN", "127.0.0.1:6000");
+    // On a host like Render, bind to 0.0.0.0 and the injected $PORT; otherwise localhost for dev.
+    // MOCK_SCADA_LISTEN still wins when set explicitly.
+    let address = env::var("MOCK_SCADA_LISTEN").ok().filter(|v| !v.is_empty())
+        .or_else(|| env::var("PORT").ok().filter(|v| !v.is_empty()).map(|p| format!("0.0.0.0:{p}")))
+        .unwrap_or_else(|| "127.0.0.1:6000".to_string());
     let every = Duration::from_millis(setting("MOCK_SCADA_INTERVAL_MS", "1000").parse().unwrap_or(1000));
     let listener = match TcpListener::bind(&address) {
         Ok(listener) => listener,
