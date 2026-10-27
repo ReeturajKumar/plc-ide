@@ -1,0 +1,13 @@
+# Prometheus config for scraping the MyPLC backend deployed on Render.
+# Replace YOUR_MYPLC_TOKEN below with the backend's MYPLC_TOKEN, then: docker compose up -d
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: myplc
+    scheme: https                 # Render serves the public URL over HTTPS
+    metrics_path: /metrics
+    params:
+      token: ["YOUR_MYPLC_TOKEN"] # must match MYPLC_TOKEN on the backend
+    static_configs:
+      - targets: ["plc-ide.onrender.com"]   # host only, no https:// and no port

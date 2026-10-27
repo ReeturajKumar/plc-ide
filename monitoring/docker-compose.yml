@@ -1,0 +1,19 @@
+# One command to watch the Render backend: `docker compose up -d` (from this folder).
+# Grafana: http://localhost:3000  (login admin / admin, then add the Prometheus datasource
+# http://prometheus:9090 and import grafana-dashboard.json).
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.render.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
