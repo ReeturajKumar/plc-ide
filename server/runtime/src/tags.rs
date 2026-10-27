@@ -129,7 +129,12 @@ fn tag_values(text: &str, names: &HashMap<String, String>) -> (Vec<(String, f64)
     let (mut values, mut unknown) = (Vec::new(), Vec::new());
     for tag in tags.as_array().into_iter().flatten() {
         let id = tag[id_key].as_str().unwrap_or_default().to_lowercase();
-        let value = tag[value_key].as_f64().or_else(|| tag[value_key].as_bool().map(f64::from));
+        // R3: never apply a non-finite value (NaN, ±inf, or a number that overflows f64); a
+        // bad or fake SCADA message must not poison a tag. Such values fall through to `unknown`.
+        let value = tag[value_key]
+            .as_f64()
+            .or_else(|| tag[value_key].as_bool().map(f64::from))
+            .filter(|v| v.is_finite());
         match (names.get(&id), value) {
             (Some(name), Some(value)) => values.push((name.clone(), value)),
             _ => unknown.push(id),
@@ -265,5 +270,12 @@ mod tests {
         let screen =r#"{"screen_name":"Screen 23","screen_id":23,"data":[{"TagID":"abc","RegAddress":633,"FunctionType":"HoldingRegister","Value":9407.000000}]}"#;
         assert_eq!(tag_values(screen, &names), (vec![("T1".to_string(), 9407.0)], vec![]));
         assert_eq!(tag_values(r#"{"hello":1}"#, &names), Default::default());
+        // R3: a garbage/overflowing number can't poison a tag — serde_json rejects the whole
+        // message, and the is_finite filter guards any non-finite value that reached us.
+        let bad = r#"{"type":"st_tags","tags":[{"tag_id":"abc","value":1e400}]}"#;
+        assert_eq!(tag_values(bad, &names), Default::default());
+        // A wrong-typed value (text where a number is expected) is ignored, not applied.
+        let wrong = r#"{"type":"st_tags","tags":[{"tag_id":"abc","value":"oops"}]}"#;
+        assert_eq!(tag_values(wrong, &names), (vec![], vec!["abc".to_string()]));
     }
 }

@@ -1,7 +1,7 @@
 //! myplc-runtime: the PLC runtime on its own, without the IDE.
 //!
 //! ```text
-//! myplc-runtime --listen <address:port> [--token <secret>] [--data <folder>]
+//! myplc-runtime --listen <address:port> [--data <folder>]   (token: set MYPLC_TOKEN)
 //! myplc-runtime <project-dir> [--scan-ms N] [--scans N] [--trace] [--io simulated]
 //! ```
 //!
@@ -38,10 +38,13 @@ mod metrics;
 mod server;
 mod tags;
 
-const USAGE: &str = "usage: myplc-runtime --listen <address:port> [--token <secret>] [--data <folder>]
+const USAGE: &str = "usage: myplc-runtime --listen <address:port> [--data <folder>]   (token: set MYPLC_TOKEN)
        myplc-runtime <project-dir> [--scan-ms N] [--scans N] [--trace] [--io simulated]";
 
-/// `--listen <addr> [--token <t>] [--data <dir>]`; the token may also come from MYPLC_TOKEN.
+/// `--listen <addr> [--data <dir>]`; the token comes only from MYPLC_TOKEN.
+///
+/// R5: the token is read from the environment, not a `--token` flag, so it never appears
+/// in the process list (`tasklist /v`) or a shell's command history.
 fn server_config(mut args: impl Iterator<Item = String>) -> Result<server::ServerConfig, String> {
     let mut config = server::ServerConfig {
         listen: String::new(),
@@ -52,8 +55,8 @@ fn server_config(mut args: impl Iterator<Item = String>) -> Result<server::Serve
         let mut value = |flag: &str| args.next().filter(|v| !v.is_empty()).ok_or(format!("{flag} needs a value"));
         match arg.as_str() {
             "--listen" => config.listen = value("--listen")?,
-            "--token" => config.token = Some(value("--token")?),
             "--data" => config.data_dir = PathBuf::from(value("--data")?),
+            "--token" => return Err("--token is no longer accepted (it leaks via the process list); set the MYPLC_TOKEN environment variable instead".into()),
             other => return Err(format!("unknown option {other}")),
         }
     }
@@ -65,7 +68,7 @@ fn server_config(mut args: impl Iterator<Item = String>) -> Result<server::Serve
     // there; any other address requires one.
     if config.token.is_none() && !is_loopback(&config.listen) {
         return Err(format!(
-            "{} is reachable from the network, so a token is required: pass --token <secret>, set MYPLC_TOKEN, or listen on 127.0.0.1 for this PC only",
+            "{} is reachable from the network, so a token is required: set the MYPLC_TOKEN environment variable, or listen on 127.0.0.1 for this PC only",
             config.listen
         ));
     }
@@ -367,11 +370,17 @@ mod r1_tests {
         assert!(!is_loopback("192.168.1.203:5020"));
     }
 
+    // One test owns MYPLC_TOKEN so the process-wide env isn't raced by parallel tests.
     #[test]
     fn network_address_needs_a_token() {
         assert!(config(&["--listen", "0.0.0.0:5020"]).is_err());
         assert!(config(&["--listen", "192.168.1.203:5020"]).is_err());
         assert!(config(&["--listen", "127.0.0.1:5020"]).is_ok());
-        assert!(config(&["--listen", "0.0.0.0:5020", "--token", "secret"]).is_ok());
+        // R5: --token used to put the secret in the process list; it's no longer accepted.
+        assert!(config(&["--listen", "127.0.0.1:5020", "--token", "secret"]).is_err());
+        // R5: the token comes from MYPLC_TOKEN; with it set, a network address is allowed.
+        std::env::set_var("MYPLC_TOKEN", "secret");
+        assert!(server_config(["--listen", "0.0.0.0:5020"].iter().map(|s| s.to_string())).is_ok());
+        std::env::remove_var("MYPLC_TOKEN");
     }
 }

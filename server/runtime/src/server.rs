@@ -7,21 +7,25 @@
 //! - A client leaving does not stop the PLC.
 //! - The loaded project and the RUN/STOP mode are saved in the data folder, so after a
 //!   restart (crash, reboot) the same project is loaded and, if it was running, runs again.
-//! - With a token (`--token` or `MYPLC_TOKEN`), clients must connect to `ws://<addr>/?token=…`.
+//! - With a token (`MYPLC_TOKEN`), clients must connect to `ws://<addr>/?token=…`, and
+//!   `GET /metrics` must carry the same `?token=…`.
 //! - Plain HTTP requests (hosting platforms' health checks) get `200 OK`, not a refusal;
 //!   `GET /metrics` gets the runtime's live numbers for Prometheus (see `metrics`).
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tungstenite::handshake::server::{ErrorResponse, Request as HttpRequest, Response as HttpResponse};
+use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Error as WsError, Message, WebSocket};
 
 use crate::host::Host;
@@ -33,6 +37,18 @@ use myplc_core::ENGINE_STACK_BYTES;
 const EVENT_INTERVAL: Duration = Duration::from_millis(50);
 /// The file in the data folder that remembers the project and the RUN/STOP mode.
 const SAVED_FILE: &str = "runtime-state.json";
+/// R8: refuse beyond this many simultaneous connections, so a flood can't exhaust threads.
+const MAX_CONNECTIONS: usize = 128;
+/// R8: the largest WebSocket message accepted, so one huge frame can't exhaust memory.
+const MAX_MESSAGE_BYTES: usize = 1 << 20; // 1 MiB
+/// Connections currently being served (for the `MAX_CONNECTIONS` cap).
+static CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+/// R9: within this window a source host may make at most `TOKEN_FAIL_MAX` wrong-token
+/// attempts; beyond that it's refused until the window passes.
+const TOKEN_FAIL_WINDOW: Duration = Duration::from_secs(60);
+const TOKEN_FAIL_MAX: u32 = 5;
+/// R9: pause after each wrong token, so sequential guessing is slow even below the cap.
+const TOKEN_FAIL_DELAY: Duration = Duration::from_secs(1);
 
 pub struct ServerConfig {
     pub listen: String,
@@ -128,6 +144,29 @@ fn token_of(request: &HttpRequest) -> Option<&str> {
     request.uri().query()?.split('&').find_map(|pair| pair.strip_prefix("token="))
 }
 
+/// R9: wrong-token attempts per source host, as (count, window start). ponytail: entries are
+/// kept per host — a tiny set on a PLC backend — so there's no eviction.
+static TOKEN_FAILS: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The source host of a `peer` address ("ip:port" → "ip"): the rate-limit key.
+fn host_of(peer: &str) -> &str {
+    peer.rsplit_once(':').map_or(peer, |(host, _)| host)
+}
+
+/// Record one wrong-token attempt from `ip` at `now`; the count resets once the window passes.
+fn note_token_fail(fails: &mut HashMap<String, (u32, Instant)>, ip: &str, now: Instant) {
+    let entry = fails.entry(ip.to_string()).or_insert((0, now));
+    if now.duration_since(entry.1) > TOKEN_FAIL_WINDOW {
+        *entry = (0, now);
+    }
+    entry.0 += 1;
+}
+
+/// Whether `ip` is over the wrong-token cap within the current window.
+fn token_locked(fails: &HashMap<String, (u32, Instant)>, ip: &str, now: Instant) -> bool {
+    matches!(fails.get(ip), Some(&(count, start)) if count >= TOKEN_FAIL_MAX && now.duration_since(start) <= TOKEN_FAIL_WINDOW)
+}
+
 fn send(ws: &mut WebSocket<TcpStream>, message: &RuntimeMessage) -> Result<(), WsError> {
     ws.send(Message::text(serde_json::to_string(message).expect("protocol messages serialize")))
 }
@@ -137,8 +176,8 @@ enum Visitor {
     /// A WebSocket upgrade: an IDE.
     WebSocket,
     /// A plain HTTP request, e.g. a health check; `head` for a HEAD request, `metrics`
-    /// for `/metrics`.
-    Http { head: bool, metrics: bool },
+    /// for `/metrics`, `token` the `?token=` query parameter (used to guard `/metrics`).
+    Http { head: bool, metrics: bool, token: Option<String> },
     /// Nothing usable (a port scan, or a client that went away).
     Nothing,
 }
@@ -158,7 +197,15 @@ fn visitor(stream: &TcpStream) -> Visitor {
                 if request.contains("\r\n\r\n") || n == buf.len() {
                     let upgrade = request.lines().any(|line| line.starts_with("upgrade:") && line.contains("websocket"));
                     let metrics = request.split(' ').nth(1).is_some_and(|path| path.starts_with("/metrics"));
-                    return if upgrade { Visitor::WebSocket } else { Visitor::Http { head: request.starts_with("head "), metrics } };
+                    // Token from the original (case-preserving) bytes, matched raw like `token_of`.
+                    let token = String::from_utf8_lossy(&buf[..n])
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split(' ').nth(1))
+                        .and_then(|path| path.split_once('?'))
+                        .and_then(|(_, query)| query.split('&').find_map(|p| p.strip_prefix("token=")))
+                        .map(str::to_string);
+                    return if upgrade { Visitor::WebSocket } else { Visitor::Http { head: request.starts_with("head "), metrics, token } };
                 }
             }
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
@@ -171,14 +218,14 @@ fn visitor(stream: &TcpStream) -> Visitor {
     }
 }
 
-/// A health check (`200 OK`) or the metrics, then close.
-fn answer_http(mut stream: TcpStream, head: bool, body: String) {
+/// A plain HTTP reply (`status` is e.g. `200 OK` or `401 Unauthorized`), then close.
+fn answer_http(mut stream: TcpStream, head: bool, status: &str, body: String) {
     let mut request = [0u8; 8192];
     let _ = stream.read(&mut request); // consume it, so closing doesn't reset the connection
     let length = body.len();
     let body = if head { "" } else { &body };
     // nosniff: these endpoints return plain text; stop a browser from guessing another type.
-    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}");
+    let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}");
     let _ = stream.write_all(response.as_bytes());
 }
 
@@ -188,20 +235,36 @@ fn serve_client(stream: TcpStream, host: &Host, saved: &Saved, token: Option<&st
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     match visitor(&stream) {
         Visitor::WebSocket => {}
-        Visitor::Http { head, metrics: false } => return answer_http(stream, head, "ok
+        Visitor::Http { head, metrics: false, .. } => return answer_http(stream, head, "200 OK", "ok
 ".into()),
-        Visitor::Http { head, metrics: true } => {
+        Visitor::Http { head, metrics: true, token: query_token } => {
+            // R4: /metrics can expose performance details; when a token is set, require it here too.
+            if let Some(expected) = token {
+                if query_token.as_deref() != Some(expected) {
+                    return answer_http(stream, head, "401 Unauthorized", "A valid token is required.
+".into());
+                }
+            }
             let running = host.state().status == RuntimeStatus::Running;
-            return answer_http(stream, head, metrics::render(running));
+            return answer_http(stream, head, "200 OK", metrics::render(running));
         }
         Visitor::Nothing => return,
     }
     if stream.set_read_timeout(None).is_err() {
         return;
     }
+    // R9: rate-limit token guesses by source host.
+    let source = host_of(&peer).to_string();
+    if token.is_some() && token_locked(&TOKEN_FAILS.lock().unwrap(), &source, Instant::now()) {
+        eprintln!("[runtime] too many bad tokens from {source}; refusing for now");
+        return; // connection dropped → closed
+    }
     let check = |request: &HttpRequest, response: HttpResponse| -> Result<HttpResponse, ErrorResponse> {
         match token {
             Some(expected) if token_of(request) != Some(expected) => {
+                // R9: count this wrong attempt, then pause to slow brute force.
+                note_token_fail(&mut TOKEN_FAILS.lock().unwrap(), &source, Instant::now());
+                thread::sleep(TOKEN_FAIL_DELAY);
                 use tungstenite::http::{header, HeaderValue, StatusCode};
                 let body = "A valid token is required.";
                 let mut refused = ErrorResponse::new(Some(body.into()));
@@ -214,7 +277,11 @@ fn serve_client(stream: TcpStream, host: &Host, saved: &Saved, token: Option<&st
             _ => Ok(response),
         }
     };
-    let mut ws = match tungstenite::accept_hdr(stream, check) {
+    // R8: cap message and frame size so one huge message can't exhaust memory.
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_MESSAGE_BYTES));
+    let mut ws = match tungstenite::accept_hdr_with_config(stream, check, Some(config)) {
         Ok(ws) => ws,
         Err(e) => return eprintln!("[runtime] refused {peer}: {e}"),
     };
@@ -283,13 +350,24 @@ pub fn serve(config: ServerConfig) -> ExitCode {
     );
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        // R8: cap simultaneous connections so a flood can't exhaust threads or memory.
+        // ponytail: load-then-add may overshoot by a few under a burst; harmless.
+        if CONNECTIONS.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+            eprintln!("[runtime] too many connections ({MAX_CONNECTIONS}); refusing one");
+            continue; // stream dropped here → connection closed
+        }
+        CONNECTIONS.fetch_add(1, Ordering::Relaxed);
         let (host, saved, token) = (Arc::clone(&host), Arc::clone(&saved), token.clone());
         // Commands like STEP run scans on the client's thread: give it the engine's stack.
         let spawned = thread::Builder::new()
             .name("plc-client".into())
             .stack_size(ENGINE_STACK_BYTES)
-            .spawn(move || serve_client(stream, &host, &saved, token.as_deref()));
+            .spawn(move || {
+                serve_client(stream, &host, &saved, token.as_deref());
+                CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+            });
         if let Err(e) = spawned {
+            CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
             eprintln!("[runtime] can't serve a client: {e}");
         }
     }
@@ -304,4 +382,32 @@ pub fn default_data_dir() -> PathBuf {
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
         .unwrap_or_default()
         .join("myplc-data")
+}
+
+#[cfg(test)]
+mod r9_tests {
+    use super::*;
+
+    #[test]
+    fn locks_out_after_too_many_wrong_tokens() {
+        let mut fails = HashMap::new();
+        let t0 = Instant::now();
+        assert!(!token_locked(&fails, "1.2.3.4", t0));
+        for _ in 0..TOKEN_FAIL_MAX {
+            note_token_fail(&mut fails, "1.2.3.4", t0);
+        }
+        assert!(token_locked(&fails, "1.2.3.4", t0));
+        // A different host is unaffected.
+        assert!(!token_locked(&fails, "5.6.7.8", t0));
+        // Once the window passes, the next attempt starts a fresh count (not yet locked).
+        let later = t0 + TOKEN_FAIL_WINDOW + Duration::from_secs(1);
+        note_token_fail(&mut fails, "1.2.3.4", later);
+        assert!(!token_locked(&fails, "1.2.3.4", later));
+    }
+
+    #[test]
+    fn host_of_strips_the_port() {
+        assert_eq!(host_of("127.0.0.1:54321"), "127.0.0.1");
+        assert_eq!(host_of("[::1]:54321"), "[::1]");
+    }
 }
