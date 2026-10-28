@@ -144,6 +144,22 @@ fn token_of(request: &HttpRequest) -> Option<&str> {
     request.uri().query()?.split('&').find_map(|pair| pair.strip_prefix("token="))
 }
 
+/// Compare a supplied token with the expected one in constant time: no early exit on the
+/// first differing byte, so the time taken doesn't leak how much of a guess was right.
+/// (Length can still differ; the token is a fixed secret, so that's acceptable.)
+fn token_eq(got: Option<&str>, expected: &str) -> bool {
+    let Some(got) = got else { return false };
+    let (a, b) = (got.as_bytes(), expected.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// R9: wrong-token attempts per source host, as (count, window start). ponytail: entries are
 /// kept per host — a tiny set on a PLC backend — so there's no eviction.
 static TOKEN_FAILS: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -240,7 +256,7 @@ fn serve_client(stream: TcpStream, host: &Host, saved: &Saved, token: Option<&st
         Visitor::Http { head, metrics: true, token: query_token } => {
             // R4: /metrics can expose performance details; when a token is set, require it here too.
             if let Some(expected) = token {
-                if query_token.as_deref() != Some(expected) {
+                if !token_eq(query_token.as_deref(), expected) {
                     return answer_http(stream, head, "401 Unauthorized", "A valid token is required.
 ".into());
                 }
@@ -261,7 +277,7 @@ fn serve_client(stream: TcpStream, host: &Host, saved: &Saved, token: Option<&st
     }
     let check = |request: &HttpRequest, response: HttpResponse| -> Result<HttpResponse, ErrorResponse> {
         match token {
-            Some(expected) if token_of(request) != Some(expected) => {
+            Some(expected) if !token_eq(token_of(request), expected) => {
                 // R9: count this wrong attempt, then pause to slow brute force.
                 note_token_fail(&mut TOKEN_FAILS.lock().unwrap(), &source, Instant::now());
                 thread::sleep(TOKEN_FAIL_DELAY);
@@ -409,5 +425,14 @@ mod r9_tests {
     fn host_of_strips_the_port() {
         assert_eq!(host_of("127.0.0.1:54321"), "127.0.0.1");
         assert_eq!(host_of("[::1]:54321"), "[::1]");
+    }
+
+    #[test]
+    fn token_eq_matches_only_the_right_token() {
+        assert!(token_eq(Some("secret"), "secret"));
+        assert!(!token_eq(Some("secre"), "secret")); // shorter
+        assert!(!token_eq(Some("secrets"), "secret")); // longer
+        assert!(!token_eq(Some("Secret"), "secret")); // wrong case
+        assert!(!token_eq(None, "secret")); // missing
     }
 }
