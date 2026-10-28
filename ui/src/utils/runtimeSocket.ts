@@ -1,14 +1,14 @@
 import type { Request, Response, RuntimeMessage, RuntimeState } from "../types/protocol";
+import { getConnection } from "./connection";
 
 /**
- * The connection to the PLC backend (`myplc-runtime --listen`): one WebSocket at
- * `VITE_RUNTIME_URL` (from `.env`), carrying protocol messages as JSON. Requests get the
- * response with the same id; `STATE_UPDATE`s arrive on their own. It connects on the first
- * request and again after the connection is lost. Only `services/runtimeApi` uses it.
+ * The connection to the PLC backend (`myplc-runtime --listen`): one WebSocket to the
+ * address and token from `connection` (saved on this machine, set in Settings), carrying
+ * protocol messages as JSON. Requests get the response with the same id; `STATE_UPDATE`s
+ * arrive on their own. It connects on the first request and again after the connection is
+ * lost. Only `services/runtimeApi` uses it.
  */
 
-const RUNTIME_URL: string = import.meta.env.VITE_RUNTIME_URL || "ws://127.0.0.1:5020";
-const RUNTIME_TOKEN: string | undefined = import.meta.env.VITE_RUNTIME_TOKEN || undefined;
 /** The longest a request may take (LOAD_PROJECT compiles the whole project). */
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -25,8 +25,9 @@ const unavailable = (message: string) => ({ code: "UNAVAILABLE", message });
 function connect(): Promise<WebSocket> {
     if (socket?.readyState === WebSocket.OPEN) return Promise.resolve(socket);
     if (connecting) return connecting;
+    const { url: base, token } = getConnection();
     connecting = new Promise((resolve, reject) => {
-        const url = RUNTIME_TOKEN ? `${RUNTIME_URL}?token=${encodeURIComponent(RUNTIME_TOKEN)}` : RUNTIME_URL;
+        const url = token ? `${base}?token=${encodeURIComponent(token)}` : base;
         const ws = new WebSocket(url);
         ws.onopen = () => {
             socket = ws;
@@ -47,7 +48,7 @@ function connect(): Promise<WebSocket> {
             socket = null;
             connecting = null;
             if (!wasOpen) {
-                reject(unavailable(`The PLC runtime can't be reached at ${RUNTIME_URL}. Check that it is running and that VITE_RUNTIME_URL and VITE_RUNTIME_TOKEN are right.`));
+                reject(unavailable(`The PLC runtime can't be reached at ${base}. Check that it is running and that the backend address and token in Settings are right.`));
                 return;
             }
             const lost = unavailable("The connection to the PLC runtime was lost.");
@@ -57,6 +58,14 @@ function connect(): Promise<WebSocket> {
         };
     });
     return connecting;
+}
+
+/** Drop the connection so the next request reconnects — e.g. after the backend settings change. */
+export function reconnect(): void {
+    const old = socket;
+    socket = null;
+    connecting = null;
+    old?.close();
 }
 
 /** Protocol requests to the backend. */

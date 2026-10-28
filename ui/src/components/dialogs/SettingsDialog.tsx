@@ -2,6 +2,11 @@ import { useState, type ReactNode } from "react";
 import Dialog from "../common/Dialog";
 import Button from "../common/Button";
 import { AUTOSAVE_DELAY_MAX, AUTOSAVE_DELAY_MIN, useUIStore } from "../../store/uiStore";
+import { getConnection, setConnection } from "../../utils/connection";
+import { reconnect } from "../../utils/runtimeSocket";
+
+const INPUT_CLASS =
+    "px-2 py-1 rounded border bg-[var(--theme-bg-input)] text-xs text-[var(--theme-text-primary)] border-[var(--theme-border)] focus:outline-none focus:border-[var(--theme-border-focus)]";
 
 const PRESETS = [1000, 3000, 5000, 10_000, 30_000];
 const seconds = (ms: number) => `${ms / 1000} s`;
@@ -44,9 +49,44 @@ const SettingsDialog = () => {
         setDelayText(String(ms));
     };
 
+    const [conn, setConn] = useState(getConnection());
+    const saveBackend = () => {
+        setConnection(conn);
+        reconnect();
+        ui.notify("info", "Backend connection saved.");
+    };
+
     return (
         <Dialog title="Settings" onClose={close} footer={<Button onClick={close}>Done</Button>}>
-            <div className="text-[10px] font-semibold tracking-wider text-[var(--theme-text-muted)] uppercase pb-1">Editor</div>
+            <div className="text-[10px] font-semibold tracking-wider text-[var(--theme-text-muted)] uppercase pb-1">Backend connection</div>
+
+            <Row label="Backend address" help="The PLC server's WebSocket URL, e.g. wss://your-server.onrender.com.">
+                <input
+                    type="text"
+                    value={conn.url}
+                    onChange={(e) => setConn({ ...conn, url: e.target.value })}
+                    aria-label="Backend address"
+                    className={`${INPUT_CLASS} w-64`}
+                    placeholder="wss://…"
+                />
+            </Row>
+
+            <Row label="Access token" help="Kept only on this computer — never inside the app you share. Leave empty if the server has no token.">
+                <input
+                    type="password"
+                    value={conn.token}
+                    onChange={(e) => setConn({ ...conn, token: e.target.value })}
+                    aria-label="Access token"
+                    className={`${INPUT_CLASS} w-64`}
+                    placeholder="token"
+                />
+            </Row>
+
+            <div className="flex justify-end pt-2 pb-3 border-b border-[var(--theme-border)]">
+                <Button onClick={saveBackend}>Save &amp; reconnect</Button>
+            </div>
+
+            <div className="text-[10px] font-semibold tracking-wider text-[var(--theme-text-muted)] uppercase pb-1 pt-3">Editor</div>
 
             <Row label="Auto Save" help="Save changed files by themselves after a pause in typing.">
                 <Toggle on={ui.autoSave} onChange={ui.setAutoSave} label="Auto Save" />

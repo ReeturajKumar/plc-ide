@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::metrics;
 
+use myplc_core::compiler::error::StError;
 use myplc_core::compiler::project::{ProgramSource, ProjectContext};
 use myplc_core::io::{self, IoImage, Mapping};
 use myplc_core::protocol::{Breakpoint, Command, ErrorCode, ProtocolError, RunOptions, RuntimeState, RuntimeStatus, ScanError};
@@ -70,14 +71,29 @@ impl Inner {
     fn scan(&mut self, stop: Stop) -> bool {
         let Some(runtime) = self.runtime.as_mut() else { return false };
         let cycle_ms = i64::try_from(self.scan_time_ms).unwrap_or(i64::MAX);
-        let can_scan = match runtime.scan_cycle(&mut self.io, cycle_ms, stop) {
-            ScanOutcome::Completed => true,
-            ScanOutcome::Paused(_) => {
+        let io = &mut self.io;
+        // A scan should only ever return an outcome. Catch an unexpected panic (a runtime
+        // bug) and stop the PLC cleanly, instead of killing the scan thread and freezing
+        // silently. The default panic hook still logs it to stderr for diagnosis.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.scan_cycle(io, cycle_ms, stop)));
+        let can_scan = match outcome {
+            Ok(ScanOutcome::Completed) => true,
+            Ok(ScanOutcome::Paused(_)) => {
                 self.status = RuntimeStatus::Paused;
                 return true; // mid-scan: not finished, nothing to report yet
             }
-            ScanOutcome::Failed(failure) => {
+            Ok(ScanOutcome::Failed(failure)) => {
                 self.error = Some(ScanError { program: failure.program, error: failure.error });
+                self.status = RuntimeStatus::Stopped;
+                self.io.reset_outputs();
+                false
+            }
+            Err(_) => {
+                // The scan panicked: stop safely, like any scan failure (outputs to safe state).
+                self.error = Some(ScanError {
+                    program: String::new(),
+                    error: StError::general("the PLC stopped after an internal error during a scan"),
+                });
                 self.status = RuntimeStatus::Stopped;
                 self.io.reset_outputs();
                 false
