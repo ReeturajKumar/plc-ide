@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { fsApi } from "../utils/tauri";
+import { runtimeApi } from "../services/runtimeApi";
 import {
     baseName,
     childPath,
@@ -33,6 +34,8 @@ const RECENTS_KEY = "myplc.recentProjects";
 export interface RecentProject {
     name: string;
     rootPath: string;
+    /** The project's id (for releasing its SCADA tag usage when removed). Absent for older entries. */
+    id?: string;
 }
 
 export function getRecentProjects(): RecentProject[] {
@@ -43,10 +46,24 @@ export function getRecentProjects(): RecentProject[] {
     }
 }
 
-function rememberProject(name: string, rootPath: string): void {
+function rememberProject(name: string, rootPath: string, id: string): void {
     const others = getRecentProjects().filter((r) => r.rootPath !== rootPath);
-    const next = [{ name, rootPath }, ...others].slice(0, 8);
+    const next = [{ name, rootPath, id }, ...others].slice(0, 8);
     localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+}
+
+/** Remove a project from the recent list and have the backend drop its SCADA tag usage from
+ *  st_tags. Best-effort: a backend that's unreachable doesn't block removal from the list. */
+export async function removeRecentProject(entry: RecentProject): Promise<void> {
+    const next = getRecentProjects().filter((r) => r.rootPath !== entry.rootPath);
+    localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+    if (entry.id) {
+        try {
+            await runtimeApi.releaseProject(entry.id);
+        } catch (e) {
+            console.warn("[tags] couldn't release deleted project", e);
+        }
+    }
 }
 
 const msg = (e: unknown): string => (typeof e === "string" ? e : "Something went wrong.");
@@ -64,7 +81,7 @@ async function loadWorkspace(project: PLCProject) {
     useUIStore.getState().setExplorerSelection(null);
     useEditorStore.getState().closeAll();
     useProjectStore.getState().setProject(project);
-    rememberProject(project.name, project.rootPath);
+    rememberProject(project.name, project.rootPath, project.id);
     await refreshTree();
     const first = useProjectStore.getState().project?.programs[0];
     if (first) await openFile(first.path);
@@ -369,6 +386,8 @@ export async function closeTab(path: string): Promise<void> {
             if (!ok) return;
         }
     }
+    // Don't leave the PLC running a program whose file you just closed: stop it first.
+    await stopIfActive();
     editor.closeFile(path);
 }
 

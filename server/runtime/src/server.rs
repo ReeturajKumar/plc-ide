@@ -357,6 +357,13 @@ pub fn serve(config: ServerConfig) -> ExitCode {
         let host = Arc::clone(&host);
         thread::spawn(move || crate::tags::poll(host));
     }
+    // Durable tag values: seed the last snapshot now (before restoring the project, so it
+    // starts from the last-known values, not zero), then keep snapshotting in the background.
+    if crate::tags::configured() {
+        crate::tags::seed(&host);
+        let host = Arc::clone(&host);
+        thread::spawn(move || crate::tags::snapshot(host));
+    }
     let saved = Arc::new(Saved { dir: config.data_dir.clone() });
     saved.restore(&host);
     let token: Option<Arc<str>> = config.token.map(Into::into);

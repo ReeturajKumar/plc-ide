@@ -58,6 +58,11 @@ pub enum Command {
         /// PLC scan interval; the runtime's default when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scan_time_ms: Option<u64>,
+        /// The project's stable id (from project.json). When present, the backend records
+        /// which SCADA tags this project uses, and how many times, in `st_tags`. Absent for
+        /// older clients: then usage tracking is skipped.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
     },
     /// Start scanning the loaded project from its initial state: RUNNING, or PAUSED before
     /// the first scan when `paused` (ready for STEP). The payload is optional.
@@ -85,6 +90,9 @@ pub enum Command {
     /// The SCADA tags from the tag database (answered with `ResponseData::tags`), or
     /// `UNAVAILABLE` if the database isn't configured or can't be reached.
     GetTags,
+    /// A project was deleted: drop its contribution to the SCADA tag usage counts in
+    /// `st_tags` (and remove any tag whose total falls to zero). Answered with the state.
+    ReleaseProject { project_id: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

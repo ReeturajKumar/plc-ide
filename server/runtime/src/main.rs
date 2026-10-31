@@ -240,7 +240,7 @@ enum Event {
 /// LOAD → RUNNING → STOPPING → STOPPED, all carried out by the host.
 fn run(config: RuntimeConfig, programs: Vec<ProgramSource>, mappings: Vec<Mapping>) -> ExitCode {
     let host = Host::new();
-    let load = protocol::Command::LoadProject { programs, mappings, scan_time_ms: Some(config.scan_interval_ms) };
+    let load = protocol::Command::LoadProject { programs, mappings, scan_time_ms: Some(config.scan_interval_ms), project_id: None };
     let loaded = match host.execute(load) {
         Ok(state) => state,
         Err(ProtocolError { code: ErrorCode::CompilationError(report), .. }) => {

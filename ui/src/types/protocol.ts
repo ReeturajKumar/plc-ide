@@ -16,7 +16,7 @@ export type RequestId = string;
 export type Request = { id: RequestId } & Command;
 
 export type Command =
-    | { command: "LOAD_PROJECT"; payload: { programs: ProgramSource[]; mappings?: IoMapping[]; scanTimeMs?: number } }
+    | { command: "LOAD_PROJECT"; payload: { programs: ProgramSource[]; mappings?: IoMapping[]; scanTimeMs?: number; projectId?: string } }
     | { command: "RUN"; payload?: { paused?: boolean } }
     | { command: "STOP" }
     | { command: "PAUSE" }
@@ -28,7 +28,8 @@ export type Command =
     | { command: "SET_BREAKPOINTS"; payload: { breakpoints: Breakpoint[] } }
     | { command: "APPLY_IO_MAPPINGS"; payload: { mappings: IoMapping[] } }
     | { command: "GET_STATE" }
-    | { command: "GET_TAGS" };
+    | { command: "GET_TAGS" }
+    | { command: "RELEASE_PROJECT"; payload: { projectId: string } };
 
 /** `file` is the source file's name in the project, as `Location.file` reports it. */
 export interface Breakpoint {

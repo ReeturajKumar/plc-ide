@@ -28,9 +28,8 @@ const Toggle = ({ on, onChange, label }: { on: boolean; onChange: (on: boolean) 
         aria-checked={on}
         aria-label={label}
         onClick={() => onChange(!on)}
-        className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--theme-border-focus)] ${
-            on ? "bg-emerald-500/80" : "bg-[var(--theme-bg-input)] border border-[var(--theme-border)]"
-        }`}
+        className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--theme-border-focus)] ${on ? "bg-emerald-500/80" : "bg-[var(--theme-bg-input)] border border-[var(--theme-border)]"
+            }`}
     >
         <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${on ? "left-[18px]" : "left-0.5"}`} />
     </button>
@@ -57,98 +56,105 @@ const SettingsDialog = () => {
     };
 
     return (
-        <Dialog title="Settings" onClose={close} footer={<Button onClick={close}>Done</Button>}>
-            <div className="text-[10px] font-semibold tracking-wider text-[var(--theme-text-muted)] uppercase pb-1">Backend connection</div>
-
-            <Row label="Backend address" help="The PLC server's WebSocket URL, e.g. wss://your-server.onrender.com.">
-                <input
-                    type="text"
-                    value={conn.url}
-                    onChange={(e) => setConn({ ...conn, url: e.target.value })}
-                    aria-label="Backend address"
-                    className={`${INPUT_CLASS} w-64`}
-                    placeholder="wss://…"
-                />
-            </Row>
-
-            <Row label="Access token" help="Kept only on this computer — never inside the app you share. Leave empty if the server has no token.">
-                <input
-                    type="password"
-                    value={conn.token}
-                    onChange={(e) => setConn({ ...conn, token: e.target.value })}
-                    aria-label="Access token"
-                    className={`${INPUT_CLASS} w-64`}
-                    placeholder="token"
-                />
-            </Row>
-
-            <div className="flex justify-end pt-2 pb-3 border-b border-[var(--theme-border)]">
-                <Button onClick={saveBackend}>Save &amp; reconnect</Button>
-            </div>
-
-            <div className="text-[10px] font-semibold tracking-wider text-[var(--theme-text-muted)] uppercase pb-1 pt-3">Editor</div>
-
-            <Row label="Auto Save" help="Save changed files by themselves after a pause in typing.">
-                <Toggle on={ui.autoSave} onChange={ui.setAutoSave} label="Auto Save" />
-            </Row>
-
-            <Row
-                label="Auto Save Delay"
-                help={`Milliseconds after the last change before saving (${AUTOSAVE_DELAY_MIN} – ${AUTOSAVE_DELAY_MAX}).`}
-            >
-                <div className={`flex flex-col items-end gap-1.5 ${ui.autoSave ? "" : "opacity-50"}`}>
-                    <div className="flex items-center gap-1.5">
+        <Dialog title="Settings" onClose={close} width="w-[min(48rem,95vw)]" footer={<Button onClick={close}>Done</Button>}>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-10">
+                {/* Backend */}
+                <section className="flex flex-col gap-3 md:border-r md:border-[var(--theme-border)] md:pr-10">
+                    <div className="text-[10px] font-semibold tracking-wider text-[var(--theme-text-muted)] uppercase">Backend</div>
+                    <div>
+                        <label className="text-xs font-medium text-[var(--theme-text-primary)]">Address</label>
                         <input
-                            type="number"
-                            min={AUTOSAVE_DELAY_MIN}
-                            max={AUTOSAVE_DELAY_MAX}
-                            step={100}
-                            value={delayText}
-                            disabled={!ui.autoSave}
-                            onChange={(e) => {
-                                setDelayText(e.target.value);
-                                const ms = Number(e.target.value);
-                                if (ms >= AUTOSAVE_DELAY_MIN && ms <= AUTOSAVE_DELAY_MAX) ui.setAutoSaveDelay(ms);
-                            }}
-                            aria-label="Auto save delay in milliseconds"
-                            aria-invalid={!delayValid}
-                            className={`w-24 px-2 py-1 rounded border bg-[var(--theme-bg-input)] text-xs text-[var(--theme-text-primary)] focus:outline-none focus:border-[var(--theme-border-focus)] disabled:cursor-not-allowed ${
-                                delayValid ? "border-[var(--theme-border)]" : "border-red-500/70"
-                            }`}
+                            type="text"
+                            value={conn.url}
+                            onChange={(e) => setConn({ ...conn, url: e.target.value })}
+                            aria-label="Backend address"
+                            className={`${INPUT_CLASS} w-full mt-1`}
+                            placeholder="wss://…"
                         />
-                        <span className="text-[11px] text-[var(--theme-text-muted)]">ms</span>
+                        <div className="text-[11px] text-[var(--theme-text-muted)] mt-1">PLC server WebSocket URL.</div>
                     </div>
-                    <div className="flex gap-1">
-                        {PRESETS.map((ms) => (
-                            <button
-                                key={ms}
-                                disabled={!ui.autoSave}
-                                onClick={() => applyDelay(ms)}
-                                className={`px-1.5 py-0.5 rounded border text-[10px] cursor-pointer disabled:cursor-not-allowed ${
-                                    ui.autoSaveDelay === ms
-                                        ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-300"
-                                        : "border-[var(--theme-border)] text-[var(--theme-text-secondary)] hover:bg-[var(--theme-bg-hover)]"
-                                }`}
-                            >
-                                {seconds(ms)}
-                            </button>
-                        ))}
+                    <div>
+                        <label className="text-xs font-medium text-[var(--theme-text-primary)]">Token</label>
+                        <input
+                            type="password"
+                            value={conn.token}
+                            onChange={(e) => setConn({ ...conn, token: e.target.value })}
+                            aria-label="Access token"
+                            className={`${INPUT_CLASS} w-full mt-1`}
+                            placeholder="token"
+                        />
+                        <div className="text-[11px] text-[var(--theme-text-muted)] mt-1">Stored on this device only. Blank if none.</div>
                     </div>
-                    {!delayValid && (
-                        <div className="text-[11px] text-red-400">
-                            Between {AUTOSAVE_DELAY_MIN} and {AUTOSAVE_DELAY_MAX} ms (now {ui.autoSaveDelay} ms)
+                    <div className="flex justify-end">
+                        <Button onClick={saveBackend}>Save &amp; reconnect</Button>
+                    </div>
+                </section>
+
+                {/* Editor */}
+                <section>
+                    <div className="text-[10px] font-semibold tracking-wider text-[var(--theme-text-muted)] uppercase pb-1">Editor</div>
+
+                    <Row label="Auto Save" help="Save changed files by themselves after a pause in typing.">
+                        <Toggle on={ui.autoSave} onChange={ui.setAutoSave} label="Auto Save" />
+                    </Row>
+
+                    <Row
+                        label="Auto Save Delay"
+                        help={``}
+                    >
+                        <div className={`flex flex-col items-end gap-1.5 ${ui.autoSave ? "" : "opacity-50"}`}>
+                            <div className="flex items-center gap-1.5">
+                                <input
+                                    type="number"
+                                    min={AUTOSAVE_DELAY_MIN}
+                                    max={AUTOSAVE_DELAY_MAX}
+                                    step={100}
+                                    value={delayText}
+                                    disabled={!ui.autoSave}
+                                    onChange={(e) => {
+                                        setDelayText(e.target.value);
+                                        const ms = Number(e.target.value);
+                                        if (ms >= AUTOSAVE_DELAY_MIN && ms <= AUTOSAVE_DELAY_MAX) ui.setAutoSaveDelay(ms);
+                                    }}
+                                    aria-label="Auto save delay in milliseconds"
+                                    aria-invalid={!delayValid}
+                                    className={`w-24 px-2 py-1 rounded border bg-[var(--theme-bg-input)] text-xs text-[var(--theme-text-primary)] focus:outline-none focus:border-[var(--theme-border-focus)] disabled:cursor-not-allowed ${delayValid ? "border-[var(--theme-border)]" : "border-red-500/70"
+                                        }`}
+                                />
+                                <span className="text-[11px] text-[var(--theme-text-muted)]">ms</span>
+                            </div>
+                            <div className="flex gap-1">
+                                {PRESETS.map((ms) => (
+                                    <button
+                                        key={ms}
+                                        disabled={!ui.autoSave}
+                                        onClick={() => applyDelay(ms)}
+                                        className={`px-1.5 py-0.5 rounded border text-[10px] cursor-pointer disabled:cursor-not-allowed ${ui.autoSaveDelay === ms
+                                            ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-300"
+                                            : "border-[var(--theme-border)] text-[var(--theme-text-secondary)] hover:bg-[var(--theme-bg-hover)]"
+                                            }`}
+                                    >
+                                        {seconds(ms)}
+                                    </button>
+                                ))}
+                            </div>
+                            {!delayValid && (
+                                <div className="text-[11px] text-red-400">
+                                    Between {AUTOSAVE_DELAY_MIN} and {AUTOSAVE_DELAY_MAX} ms (now {ui.autoSaveDelay} ms)
+                                </div>
+                            )}
                         </div>
-                    )}
-                </div>
-            </Row>
+                    </Row>
 
-            <Row label="Word Wrap" help="Wrap long lines at the editor's edge.">
-                <Toggle on={ui.wordWrap} onChange={ui.toggleWordWrap} label="Word Wrap" />
-            </Row>
+                    <Row label="Word Wrap" help="Wrap long lines at the editor's edge.">
+                        <Toggle on={ui.wordWrap} onChange={ui.toggleWordWrap} label="Word Wrap" />
+                    </Row>
 
-            <Row label="Minimap" help="Show the code overview at the editor's right edge.">
-                <Toggle on={ui.minimap} onChange={ui.toggleMinimap} label="Minimap" />
-            </Row>
+                    <Row label="Minimap" help="Show the code overview at the editor's right edge.">
+                        <Toggle on={ui.minimap} onChange={ui.toggleMinimap} label="Minimap" />
+                    </Row>
+                </section>
+            </div>
         </Dialog>
     );
 };

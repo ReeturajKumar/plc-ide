@@ -5,10 +5,12 @@ interface DialogProps {
     onClose?: () => void;
     children: ReactNode;
     footer?: ReactNode;
+    /** Tailwind width classes for the card; defaults to a narrow card. */
+    width?: string;
 }
 
 /** Modal dialog: overlay, Escape-to-close, centered card. */
-const Dialog = ({ title, onClose, children, footer }: DialogProps) => {
+const Dialog = ({ title, onClose, children, footer, width = "w-[420px] max-w-[90vw]" }: DialogProps) => {
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
             if (e.key === "Escape") onClose?.();
@@ -26,7 +28,7 @@ const Dialog = ({ title, onClose, children, footer }: DialogProps) => {
                 role="dialog"
                 aria-modal="true"
                 aria-label={title}
-                className="theme-panel border border-[var(--theme-border)] rounded-lg shadow-xl w-[420px] max-w-[90vw]"
+                className={`theme-panel border border-[var(--theme-border)] rounded-lg shadow-xl ${width}`}
                 onClick={(e) => e.stopPropagation()}
             >
                 <div className="px-4 py-3 border-b border-[var(--theme-border)] text-sm font-semibold text-[var(--theme-text-primary)]">

@@ -21,8 +21,19 @@ use crate::host::Host;
 use crate::metrics;
 
 use myplc_core::compiler::ast::DataType;
+use myplc_core::compiler::lexer::{tokenize, TokenKind};
+use myplc_core::compiler::project::ProgramSource;
 use myplc_core::protocol::Tag;
+use myplc_core::VALID_SUFFIX;
 use postgres::{Client, Config, NoTls};
+
+/// How often the SCADA listener may re-read tag names when an unknown id arrives (a tag a
+/// program just started using, since `st_tags` is usage-driven).
+const NAME_REFRESH: Duration = Duration::from_secs(3);
+
+/// How often the backend writes its live tag values to `st_tags.last_value` (a durable
+/// snapshot, so a restart can seed the last-known values instead of starting from zero).
+const SNAPSHOT_EVERY: Duration = Duration::from_secs(5);
 
 /// Set every `KEY=VALUE` of `.env` (if there is one) that isn't already set.
 pub fn load_env_file() {
@@ -155,7 +166,7 @@ pub fn listen(url: &str, host: Arc<Host>) {
     };
     loop {
         // Fresh names on every connection: tags may have been added meanwhile.
-        let names = match names_by_id() {
+        let mut names = match names_by_id() {
             Ok(names) => names,
             Err(e) => {
                 report(e);
@@ -168,11 +179,25 @@ pub fn listen(url: &str, host: Arc<Host>) {
                 eprintln!("[scada] connected to {url} ({} tags known)", names.len());
                 metrics::SCADA_CONNECTED.store(1, Relaxed);
                 let mut warned = false;
+                let mut last_refresh = std::time::Instant::now();
                 loop {
                     match ws.read() {
                         Ok(tungstenite::Message::Text(text)) => {
                             let start = std::time::Instant::now();
-                            let (values, unknown) = tag_values(&text, &names);
+                            let (mut values, mut unknown) = tag_values(&text, &names);
+                            // st_tags is usage-driven: an unknown id may be a tag a program just
+                            // started using. Refresh the names (at most every NAME_REFRESH) and
+                            // re-resolve this message so the new tag's value applies right away.
+                            if !unknown.is_empty() && last_refresh.elapsed() >= NAME_REFRESH {
+                                if let Ok(fresh) = names_by_id() {
+                                    names = fresh;
+                                    let (v, u) = tag_values(&text, &names);
+                                    values = v;
+                                    unknown = u;
+                                    warned = false;
+                                }
+                                last_refresh = std::time::Instant::now();
+                            }
                             metrics::SCADA_MESSAGES.fetch_add(1, Relaxed);
                             metrics::SCADA_LAST_MS.store(metrics::now_ms(), Relaxed);
                             metrics::SCADA_VALUES.fetch_add(values.len() as u64, Relaxed);
@@ -215,23 +240,23 @@ fn latest_values(client: &mut Client) -> Result<Vec<(String, f64)>, String> {
     Ok(rows.iter().map(|row| (row.get(0), row.get(1))).collect())
 }
 
-/// Every enabled tag, in the SCADA's order.
+/// Every available tag, from `tagmast` (the SCADA's full catalog), in its order. These are
+/// what a program may use; the ones actually written are tracked separately in `st_tags`.
 pub fn load() -> Result<Vec<Tag>, String> {
     let mut client = connect()?;
     let rows = client
         .query(
-            "SELECT st.tag_name, coalesce(s.description, ''), coalesce(c.tag, st.data_type, ''), coalesce(t.unit, s.engineering_unit, ''),
+            "SELECT t.tag_name, coalesce(s.description, ''), coalesce(c.tag, t.data_type, ''), coalesce(t.unit, s.engineering_unit, ''),
                     coalesce(s.device_name, ''), coalesce(s.protocol_type, ''), coalesce(s.protocol_address, ''),
-                    coalesce(s.scale_factor, 1)::float8, coalesce(s.scale_offset, 0)::float8, coalesce(st.tag_class, '')
-             FROM st_tags st
-             JOIN tagmast t ON t.id = st.id
-             LEFT JOIN scada_master_tags s ON s.tag_name = st.tag_name
-             LEFT JOIN control_table c ON c.code = 5 AND c.id::text = st.data_type
-             WHERE st.tag_name IS NOT NULL AND s.is_enabled IS NOT FALSE
-             ORDER BY st.id",
+                    coalesce(s.scale_factor, 1)::float8, coalesce(s.scale_offset, 0)::float8, coalesce(t.tag_type, '')
+             FROM tagmast t
+             LEFT JOIN scada_master_tags s ON s.tag_name = t.tag_name
+             LEFT JOIN control_table c ON c.code = 5 AND c.id::text = t.data_type
+             WHERE t.tag_name IS NOT NULL AND s.is_enabled IS NOT FALSE
+             ORDER BY t.id",
             &[],
         )
-        .map_err(|e| format!("Can't read the tags from st_tags (create it with server/sql/st_tags.sql): {e}"))?;
+        .map_err(|e| format!("Can't read the tags from tagmast: {e}"))?;
     Ok(rows
         .iter()
         .map(|row| {
@@ -256,9 +281,138 @@ pub fn load() -> Result<Vec<Tag>, String> {
         .collect())
 }
 
+/// Count each available tag's occurrences across the project's sources. Only ST identifiers
+/// that name a tag are counted; the lexer drops comments and strings, so those don't inflate
+/// it. Returns (canonical tag name, count), case-insensitively like every ST name.
+fn tag_usage(programs: &[ProgramSource], available: &[String]) -> Vec<(String, i32)> {
+    let canonical: HashMap<String, &String> = available.iter().map(|n| (n.to_uppercase(), n)).collect();
+    let mut counts: HashMap<String, i32> = HashMap::new();
+    for program in programs {
+        for token in tokenize(&program.source) {
+            if let TokenKind::Identifier(name) = token.kind {
+                let upper = name.to_uppercase();
+                // `X_VALID` is X's live-value flag: reading it uses X (so X is tracked and streamed).
+                let base = upper.strip_suffix(VALID_SUFFIX).filter(|b| canonical.contains_key(*b));
+                if let Some(canon) = canonical.get(base.unwrap_or(&upper)) {
+                    *counts.entry((*canon).clone()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    counts.into_iter().collect()
+}
+
+/// Record which SCADA tags `project_id` uses (and how many times) in `st_tags`: set this
+/// project's slice, recompute each tag's total, and drop any tag whose total reaches zero.
+/// Writes **only** `st_tags`. A database error is returned so the caller can log it without
+/// failing the load.
+pub fn reconcile(project_id: &str, programs: &[ProgramSource], available: &[String]) -> Result<(), String> {
+    let usage = tag_usage(programs, available);
+    let used_names: Vec<String> = usage.iter().map(|(name, _)| name.clone()).collect();
+    let mut client = connect()?;
+    let mut tx = client.transaction().map_err(|e| format!("st_tags update: {e}"))?;
+    for (name, count) in &usage {
+        tx.execute(
+            "INSERT INTO st_tags (id, tagid, tag_name, tag_class, data_type, usage_by_project, usage_count)
+             SELECT t.id, t.tag_id, t.tag_name, t.tag_type, t.data_type, jsonb_build_object($1::text, $3::int), $3::int
+             FROM tagmast t WHERE t.tag_name = $2
+             ON CONFLICT (id) DO UPDATE SET
+                 usage_by_project = st_tags.usage_by_project || jsonb_build_object($1::text, $3::int),
+                 usage_count = coalesce((SELECT sum(v::int) FROM jsonb_each_text(st_tags.usage_by_project || jsonb_build_object($1::text, $3::int)) e(k, v)), 0)",
+            &[&project_id, name, count],
+        )
+        .map_err(|e| format!("st_tags upsert: {e}"))?;
+    }
+    // Tags this project used before but no longer does: drop its slice.
+    tx.execute(
+        "UPDATE st_tags SET
+             usage_by_project = usage_by_project - $1::text,
+             usage_count = coalesce((SELECT sum(v::int) FROM jsonb_each_text(usage_by_project - $1::text) e(k, v)), 0)
+         WHERE jsonb_exists(usage_by_project, $1) AND NOT (tag_name = ANY($2))",
+        &[&project_id, &used_names],
+    )
+    .map_err(|e| format!("st_tags prune: {e}"))?;
+    tx.execute("DELETE FROM st_tags WHERE usage_count <= 0", &[]).map_err(|e| format!("st_tags cleanup: {e}"))?;
+    tx.commit().map_err(|e| format!("st_tags commit: {e}"))?;
+    Ok(())
+}
+
+/// Seed the host with each tag's last snapshotted value (`st_tags.last_value`), so a restart
+/// starts from the last-known values instead of zero. Called once at startup, before the
+/// saved project is restored (so the restored program sees these values). Best-effort.
+pub fn seed(host: &Host) {
+    let mut client = match connect() {
+        Ok(client) => client,
+        Err(_) => return, // no database: nothing to seed from
+    };
+    match client.query("SELECT tag_name, last_value FROM st_tags WHERE last_value IS NOT NULL", &[]) {
+        Ok(rows) => {
+            let values: Vec<(String, f64)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+            if !values.is_empty() {
+                eprintln!("[tags] seeded {} tag values from the last snapshot (their _VALID flags stay FALSE until live)", values.len());
+                host.seed_tag_values(values);
+            }
+        }
+        Err(e) => eprintln!("[tags] couldn't seed tag values: {e}"),
+    }
+}
+
+/// Forever: every `SNAPSHOT_EVERY`, write the host's current tag values to `st_tags.last_value`
+/// in one batch, so they survive a restart. Writes only `st_tags`.
+pub fn snapshot(host: Arc<Host>) {
+    loop {
+        thread::sleep(SNAPSHOT_EVERY);
+        let values = host.tag_values_snapshot();
+        if values.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = values.iter().map(|(n, _)| n.clone()).collect();
+        let nums: Vec<f64> = values.iter().map(|(_, v)| *v).collect();
+        let Ok(mut client) = connect() else { continue };
+        // One statement updates every used tag's row; it only touches st_tags.
+        let done = client.execute(
+            "UPDATE st_tags s SET last_value = v.val, last_value_at = now()
+             FROM (SELECT unnest($1::text[]) AS name, unnest($2::float8[]) AS val) v
+             WHERE s.tag_name = v.name",
+            &[&names, &nums],
+        );
+        if let Err(e) = done {
+            eprintln!("[tags] couldn't snapshot tag values: {e}");
+        }
+    }
+}
+
+/// A project was deleted: remove its slice from every tag's counts, dropping tags that reach
+/// zero. Writes only `st_tags`.
+pub fn release(project_id: &str) -> Result<(), String> {
+    let mut client = connect()?;
+    client
+        .execute(
+            "UPDATE st_tags SET
+                 usage_by_project = usage_by_project - $1::text,
+                 usage_count = coalesce((SELECT sum(v::int) FROM jsonb_each_text(usage_by_project - $1::text) e(k, v)), 0)
+             WHERE jsonb_exists(usage_by_project, $1)",
+            &[&project_id],
+        )
+        .map_err(|e| format!("st_tags release: {e}"))?;
+    client.execute("DELETE FROM st_tags WHERE usage_count <= 0", &[]).map_err(|e| format!("st_tags release cleanup: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tag_usage_counts_occurrences_ignoring_comments() {
+        let available = vec!["TANK1_LEVEL".to_string(), "PUMP1".to_string()];
+        let src = "x := TANK1_LEVEL; y := tank1_level + PUMP1; z := TANK1_LEVEL_VALID; (* TANK1_LEVEL in a comment *)";
+        let programs = vec![ProgramSource { name: "p".into(), source: src.into() }];
+        let counts: HashMap<_, _> = tag_usage(&programs, &available).into_iter().collect();
+        assert_eq!(counts.get("TANK1_LEVEL"), Some(&3)); // case-insensitive; _VALID counts; the comment doesn't
+        assert_eq!(counts.get("PUMP1"), Some(&1));
+        assert_eq!(counts.get("UNUSED"), None); // a name not in `available` is ignored
+    }
 
     #[test]
     fn reads_script_and_screen_messages() {

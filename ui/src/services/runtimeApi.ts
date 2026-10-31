@@ -69,17 +69,20 @@ async function send(command: Command): Promise<RuntimeState> {
     return response.data.state;
 }
 
-/** RUN as the IDE knows it: compile and load the project, then start it. */
-async function loadAndRun(programs: ProgramSource[], mappings: IoMapping[], paused: boolean): Promise<RuntimeState> {
-    await send({ command: "LOAD_PROJECT", payload: { programs, mappings } });
+/** RUN as the IDE knows it: compile and load the project, then start it. `projectId` lets the
+ *  backend record which SCADA tags this project uses in st_tags. */
+async function loadAndRun(programs: ProgramSource[], mappings: IoMapping[], paused: boolean, projectId?: string): Promise<RuntimeState> {
+    await send({ command: "LOAD_PROJECT", payload: { programs, mappings, projectId } });
     return send({ command: "RUN", payload: { paused } });
 }
 
 export const runtimeApi = {
     /** Compile the project and start scanning, all programs in order each scan. */
-    run: (programs: ProgramSource[], mappings: IoMapping[]) => loadAndRun(programs, mappings, false),
+    run: (programs: ProgramSource[], mappings: IoMapping[], projectId?: string) => loadAndRun(programs, mappings, false, projectId),
     /** Compile the project and load it paused: no scan runs until STEP or RESUME. */
-    load: (programs: ProgramSource[], mappings: IoMapping[]) => loadAndRun(programs, mappings, true),
+    load: (programs: ProgramSource[], mappings: IoMapping[], projectId?: string) => loadAndRun(programs, mappings, true, projectId),
+    /** A project was deleted: have the backend drop its SCADA tag-usage from st_tags. */
+    releaseProject: (projectId: string) => send({ command: "RELEASE_PROJECT", payload: { projectId } }),
     stop: () => send({ command: "STOP" }),
     pause: () => send({ command: "PAUSE" }),
     resume: () => send({ command: "RESUME" }),

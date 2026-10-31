@@ -1,9 +1,15 @@
+import { useState } from "react";
 import { useUIStore } from "../../store/uiStore";
-import { getRecentProjects, openProjectDialog, openProjectFromPath } from "../../store/projectActions";
+import { getRecentProjects, openProjectDialog, openProjectFromPath, removeRecentProject, type RecentProject } from "../../store/projectActions";
 
 const Welcome = () => {
     const openDialog = useUIStore((s) => s.openDialog);
-    const recents = getRecentProjects();
+    const [recents, setRecents] = useState<RecentProject[]>(getRecentProjects);
+
+    const remove = async (entry: RecentProject) => {
+        await removeRecentProject(entry); // also tells the backend to drop its SCADA tag usage
+        setRecents(getRecentProjects());
+    };
 
     return (
         <div className="h-screen w-screen theme-app flex flex-col items-center justify-center select-none">
@@ -43,15 +49,23 @@ const Welcome = () => {
                         </div>
                         <ul className="flex flex-col">
                             {recents.map((r) => (
-                                <li key={r.rootPath}>
+                                <li key={r.rootPath} className="flex items-center group rounded-md hover:bg-[var(--theme-bg-hover)]">
                                     <button
                                         onClick={() => openProjectFromPath(r.rootPath)}
-                                        className="w-full text-left px-3 py-2 rounded-md hover:bg-[var(--theme-bg-hover)] transition-colors cursor-pointer group"
+                                        className="flex-1 text-left px-3 py-2 transition-colors cursor-pointer min-w-0"
                                     >
                                         <span className="text-xs text-[var(--theme-text-primary)]">{r.name}</span>
                                         <span className="text-[11px] text-[var(--theme-text-muted)] ml-2 group-hover:text-[var(--theme-text-secondary)]">
                                             {r.rootPath}
                                         </span>
+                                    </button>
+                                    <button
+                                        onClick={() => remove(r)}
+                                        title="Remove from recent projects (and clear its tag usage)"
+                                        aria-label={`Remove ${r.name} from recent projects`}
+                                        className="px-2 py-2 mr-1 text-[var(--theme-text-muted)] hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer focus:outline-none"
+                                    >
+                                        ✕
                                     </button>
                                 </li>
                             ))}

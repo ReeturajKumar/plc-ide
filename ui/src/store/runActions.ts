@@ -273,7 +273,8 @@ export async function runProgram(paused = false): Promise<boolean> {
     await pruneStaleMappings(items);
     try {
         // Loaded paused, before the first scan: the inputs can be set before anything runs.
-        let state = await runtimeApi.load(toSources(items), ioMappings());
+        // The project id lets the backend record this project's SCADA tag usage in st_tags.
+        let state = await runtimeApi.load(toSources(items), ioMappings(), ps.project?.id);
         ps.setCompiling([]);
         // Everything compiled from exactly these sources.
         for (const { program, source } of items) {

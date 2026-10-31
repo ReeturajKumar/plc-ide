@@ -17,7 +17,7 @@ use myplc_core::compiler::project::{ProgramSource, ProjectContext};
 use myplc_core::io::{self, IoImage, Mapping};
 use myplc_core::protocol::{Breakpoint, Command, ErrorCode, ProtocolError, RunOptions, RuntimeState, RuntimeStatus, ScanError};
 use myplc_core::runtime::{Runtime, ScanOutcome, Stop};
-use myplc_core::{load_on_engine_stack, ENGINE_STACK_BYTES};
+use myplc_core::{load_on_engine_stack, ENGINE_STACK_BYTES, VALID_SUFFIX};
 
 const DEFAULT_SCAN_MS: u64 = 100;
 const MIN_SCAN_MS: u64 = 10;
@@ -155,9 +155,20 @@ impl Host {
         lock(&self.inner).state()
     }
 
-    /// New values for some SCADA tags (name, value); programs see them from the next scan.
-    /// Tags not given keep their value.
+    /// Live values for some SCADA tags (name, value) from the SCADA; programs see them from the
+    /// next scan. Each also sets its `<tag>_VALID` flag TRUE. Tags not given keep their value.
     pub fn set_tag_values(&self, values: Vec<(String, f64)>) {
+        let flags: Vec<(String, f64)> = values.iter().map(|(name, _)| (format!("{name}{VALID_SUFFIX}"), 1.0)).collect();
+        self.apply_tag_values(values.into_iter().chain(flags).collect());
+    }
+
+    /// Values restored from the last snapshot at startup: set, but their `_VALID` flags stay
+    /// FALSE until a live value arrives, so programs can tell stale from live.
+    pub fn seed_tag_values(&self, values: Vec<(String, f64)>) {
+        self.apply_tag_values(values);
+    }
+
+    fn apply_tag_values(&self, values: Vec<(String, f64)>) {
         let mut inner = lock(&self.inner);
         if let Some(runtime) = inner.runtime.as_mut() {
             for (name, value) in &values {
@@ -165,6 +176,18 @@ impl Host {
             }
         }
         inner.tag_values.extend(values);
+    }
+
+    /// Every tag's latest value, for the durable snapshot (see `tags::snapshot`). Only used
+    /// tags have a value, so this is small; the `_VALID` flags are per-session, not saved.
+    // ponytail: a real tag whose own name ends in `_VALID` isn't snapshotted; rename it if that matters.
+    pub fn tag_values_snapshot(&self) -> Vec<(String, f64)> {
+        lock(&self.inner)
+            .tag_values
+            .iter()
+            .filter(|(name, _)| !name.ends_with(VALID_SUFFIX))
+            .map(|(name, value)| (name.clone(), *value))
+            .collect()
     }
 
     /// Watch every scan as it finishes (e.g. to trace it, or to end a run after N scans).
@@ -175,7 +198,9 @@ impl Host {
     /// Carry out one command; the state afterwards, or why it was refused.
     pub fn execute(&self, command: Command) -> Result<RuntimeState, ProtocolError> {
         match command {
-            Command::LoadProject { programs, mappings, scan_time_ms } => self.load_project(&programs, &mappings, scan_time_ms),
+            Command::LoadProject { programs, mappings, scan_time_ms, project_id } => {
+                self.load_project(&programs, &mappings, scan_time_ms, project_id.as_deref())
+            }
             Command::Run(options) => self.run(options.unwrap_or_default()),
             Command::Stop => Ok(self.stop()),
             Command::Pause => self.pause(),
@@ -205,18 +230,26 @@ impl Host {
             Command::ApplyIoMappings { mappings } => self.apply_mappings(&mappings),
             // The server answers GET_TAGS from the tag database; the PLC isn't involved.
             Command::GetState | Command::GetTags => Ok(self.state()),
+            Command::ReleaseProject { project_id } => {
+                // A deleted project: drop its tag-usage slice from st_tags. Best-effort.
+                if let Err(e) = crate::tags::release(&project_id) {
+                    eprintln!("[tags] couldn't release project {project_id}: {e}");
+                }
+                Ok(self.state())
+            }
         }
     }
 
     /// Compile and load: every variable at its initial value, the PLC STOPPED. Any running
     /// scan stops. With any compile error nothing stays loaded. Simulated inputs keep their
     /// values; outputs go to their safe state.
-    fn load_project(&self, programs: &[ProgramSource], mappings: &[Mapping], scan_time_ms: Option<u64>) -> Result<RuntimeState, ProtocolError> {
+    fn load_project(&self, programs: &[ProgramSource], mappings: &[Mapping], scan_time_ms: Option<u64>, project_id: Option<&str>) -> Result<RuntimeState, ProtocolError> {
         // The SCADA tags programs can use; none if the tag database isn't set up or reachable.
         let tags = crate::tags::load().unwrap_or_else(|e| {
             eprintln!("[tags] {e}");
             Vec::new()
         });
+        let available: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
         let tags: Vec<_> = tags.into_iter().map(|t| (t.name, t.st_type)).collect();
         let loaded = load_on_engine_stack(programs, mappings, &tags);
         let mut inner = lock(&self.inner);
@@ -239,7 +272,16 @@ impl Host {
         inner.runtime = Some(runtime);
         inner.context = Some(context);
         inner.scan_time_ms = scan_time_ms.unwrap_or(DEFAULT_SCAN_MS).clamp(MIN_SCAN_MS, MAX_SCAN_MS);
-        Ok(inner.state())
+        let state = inner.state();
+        drop(inner); // don't hold the host lock across the usage-tracking database write
+        // Option A: record which SCADA tags this project uses (and how many times) in st_tags.
+        // Best-effort — a database problem must not fail an otherwise-good compile.
+        if let Some(project_id) = project_id {
+            if let Err(e) = crate::tags::reconcile(project_id, programs, &available) {
+                eprintln!("[tags] couldn't update st_tags usage: {e}");
+            }
+        }
+        Ok(state)
     }
 
     /// Start scanning the loaded project from its initial state (or load it paused, ready
@@ -367,3 +409,23 @@ impl Host {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_values_set_the_valid_flag_seeded_ones_do_not() {
+        let host = Host::new();
+        host.seed_tag_values(vec![("A".into(), 1.0)]); // restored from the snapshot
+        host.set_tag_values(vec![("B".into(), 2.0)]); // live from the SCADA
+        {
+            let inner = lock(&host.inner);
+            assert_eq!(inner.tag_values.get("A_VALID"), None); // stale until a live value arrives
+            assert_eq!(inner.tag_values.get("B_VALID"), Some(&1.0));
+        }
+        let mut snap = host.tag_values_snapshot();
+        snap.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(snap, vec![("A".to_string(), 1.0), ("B".to_string(), 2.0)]); // flags aren't saved
+    }
+}

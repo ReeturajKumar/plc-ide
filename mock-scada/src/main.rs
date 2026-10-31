@@ -16,8 +16,12 @@ use std::env;
 use std::fs;
 use std::net::TcpListener;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// How often the mock re-reads `st_tags` (which is usage-driven: it grows as programs compile).
+const RELOAD_SECS: u64 = 3;
 
 use postgres::{Config, NoTls};
 use serde_json::json;
@@ -94,12 +98,11 @@ fn message(tags: &[Tag], t: f64) -> String {
 fn main() -> ExitCode {
     load_env(".env");
     load_env("../server/.env");
-    let tags = match load_tags() {
-        Ok(tags) if !tags.is_empty() => tags,
-        Ok(_) => {
-            eprintln!("[mock-scada] st_tags is empty: create it with server/sql/st_tags.sql");
-            return ExitCode::FAILURE;
-        }
+    // st_tags is usage-driven: it may be empty and grows as programs are compiled. Start even
+    // when empty; a reader thread below re-reads it so newly-used tags begin streaming without
+    // a restart. Only an unreachable database is fatal here.
+    let tags: Arc<Mutex<Arc<[Tag]>>> = match load_tags() {
+        Ok(tags) => Arc::new(Mutex::new(tags.into())),
         Err(e) => {
             eprintln!("[mock-scada] {e}");
             return ExitCode::FAILURE;
@@ -118,15 +121,29 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    eprintln!("[mock-scada] sending {} tags every {} ms on ws://{address}", tags.len(), every.as_millis());
-    let tags: &'static [Tag] = Box::leak(tags.into_boxed_slice());
+    eprintln!("[mock-scada] listening on ws://{address}, sending st_tags every {} ms (reloads every {RELOAD_SECS}s)", every.as_millis());
+    // Re-read st_tags periodically so usage changes (tags added/removed by compiling) take effect.
+    {
+        let tags = Arc::clone(&tags);
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_secs(RELOAD_SECS));
+            if let Ok(fresh) = load_tags() {
+                *tags.lock().unwrap() = fresh.into();
+            }
+        });
+    }
     let start = Instant::now();
     for stream in listener.incoming().flatten() {
+        let tags = Arc::clone(&tags);
         thread::spawn(move || {
             let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
             let Ok(mut ws) = accept(stream) else { return };
             eprintln!("[mock-scada] client connected: {peer}");
-            while ws.send(Message::text(message(tags, start.elapsed().as_secs_f64()))).is_ok() {
+            loop {
+                let snapshot = tags.lock().unwrap().clone(); // Arc<[Tag]>: cheap, releases the lock
+                if ws.send(Message::text(message(&snapshot, start.elapsed().as_secs_f64()))).is_err() {
+                    break;
+                }
                 thread::sleep(every);
             }
             eprintln!("[mock-scada] client left: {peer}");
