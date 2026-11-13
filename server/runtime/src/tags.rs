@@ -319,13 +319,12 @@ pub fn reconcile(project_id: &str, programs: &[ProgramSource], available: &[Stri
     let mut tx = client.transaction().map_err(|e| format!("st_tags update: {}", why(&e)))?;
     for (name, count) in &usage {
         tx.execute(
-            "INSERT INTO st_tags (id, tagid, tag_name, tag_class, data_type, protocol, usage_by_project, usage_count)
-             SELECT t.id, t.tag_id, t.tag_name, t.tag_type, t.data_type,
-                    (SELECT s.protocol_type FROM scada_master_tags s WHERE s.tag_name = t.tag_name LIMIT 1),
+            "INSERT INTO st_tags (id, tagid, tag_name, tag_class, data_type, protocol_id, usage_by_project, usage_count)
+             SELECT t.id, t.tag_id, t.tag_name, t.tag_type, t.data_type, t.protocol_type,
                     jsonb_build_object($1::text, $3::int), $3::int
              FROM tagmast t WHERE t.tag_name = $2
              ON CONFLICT (id) DO UPDATE SET
-                 protocol = EXCLUDED.protocol,
+                 protocol_id = EXCLUDED.protocol_id,
                  usage_by_project = st_tags.usage_by_project || jsonb_build_object($1::text, $3::int),
                  usage_count = coalesce((SELECT sum(v::int) FROM jsonb_each_text(st_tags.usage_by_project || jsonb_build_object($1::text, $3::int)) e(k, v)), 0)",
             &[&project_id, name, count],

@@ -17,8 +17,8 @@ ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS usage_by_project jsonb NOT N
 ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS last_value double precision;
 ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS last_value_at timestamptz;
 
--- The tag's protocol (e.g. Modbus_TCP), from scada_master_tags.
-ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS protocol character varying(100);
+-- The tag's protocol id, from tagmast.protocol_type.
+ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS protocol_id character varying(100);
 
 COMMIT;
 

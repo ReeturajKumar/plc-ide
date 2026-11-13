@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS public.st_tags (
     tag_name         character varying(250),              -- tagmast.tag_name
     tag_class        character varying(100),              -- tagmast.tag_type
     data_type        character varying(100),              -- tagmast.data_type
-    protocol         character varying(100),              -- scada_master_tags.protocol_type
+    protocol_id      character varying(100),              -- tagmast.protocol_type
     usage_count     integer NOT NULL DEFAULT 0,          -- total uses across all projects
     usage_by_project jsonb NOT NULL DEFAULT '{}'::jsonb,  -- uses per project
     last_value       double precision,                    -- last saved value
@@ -23,12 +23,12 @@ ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS usage_count integer NOT NULL
 ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS usage_by_project jsonb NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS last_value double precision;
 ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS last_value_at timestamptz;
-ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS protocol character varying(100);
+ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS protocol_id character varying(100);
+ALTER TABLE public.st_tags DROP COLUMN IF EXISTS protocol;   -- replaced by protocol_id
 
--- Fills the protocol for rows that are already there (new rows get it from the backend)
-UPDATE public.st_tags st SET protocol = (
-    SELECT s.protocol_type FROM public.scada_master_tags s WHERE s.tag_name = st.tag_name LIMIT 1
-) WHERE st.protocol IS NULL;
+-- Fills the protocol id for rows that are already there (new rows get it from the backend)
+UPDATE public.st_tags st SET protocol_id = t.protocol_type
+FROM public.tagmast t WHERE t.id::text = st.id AND st.protocol_id IS NULL;
 
 -- Brings older versions of the table up to date
 -- tagmast.id is an integer in some databases and a uuid in others: text holds both.
