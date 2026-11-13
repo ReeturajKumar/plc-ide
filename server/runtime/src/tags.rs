@@ -68,6 +68,12 @@ fn connect() -> Result<Client, String> {
 }
 
 /// Whether a tag database is configured at all.
+/// A database error's own message ("column \"x\" does not exist"); the error's Display is
+/// only "db error".
+fn why(e: &postgres::Error) -> String {
+    e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().to_string())
+}
+
 pub fn configured() -> bool {
     env::var("MYPLC_DB_NAME").is_ok_and(|v| !v.is_empty())
 }
@@ -118,7 +124,7 @@ pub fn scada_url() -> Option<String> {
 fn names_by_id() -> Result<HashMap<String, String>, String> {
     let rows = connect()?
         .query("SELECT tagid::text, tag_name FROM st_tags WHERE tagid IS NOT NULL", &[])
-        .map_err(|e| format!("Can't read st_tags: {e}"))?;
+        .map_err(|e| format!("Can't read st_tags: {}", why(&e)))?;
     Ok(rows.iter().map(|row| (row.get::<_, String>(0).to_lowercase(), row.get(1))).collect())
 }
 
@@ -236,7 +242,7 @@ fn latest_values(client: &mut Client) -> Result<Vec<(String, f64)>, String> {
              WHERE curr_value IS NOT NULL ORDER BY tag_name, cdttime DESC",
             &[],
         )
-        .map_err(|e| format!("Can't read tag values from data_log: {e}"))?;
+        .map_err(|e| format!("Can't read tag values from data_log: {}", why(&e)))?;
     Ok(rows.iter().map(|row| (row.get(0), row.get(1))).collect())
 }
 
@@ -256,7 +262,7 @@ pub fn load() -> Result<Vec<Tag>, String> {
              ORDER BY t.id",
             &[],
         )
-        .map_err(|e| format!("Can't read the tags from tagmast: {e}"))?;
+        .map_err(|e| format!("Can't read the tags from tagmast: {}", why(&e)))?;
     Ok(rows
         .iter()
         .map(|row| {
@@ -310,18 +316,21 @@ pub fn reconcile(project_id: &str, programs: &[ProgramSource], available: &[Stri
     let usage = tag_usage(programs, available);
     let used_names: Vec<String> = usage.iter().map(|(name, _)| name.clone()).collect();
     let mut client = connect()?;
-    let mut tx = client.transaction().map_err(|e| format!("st_tags update: {e}"))?;
+    let mut tx = client.transaction().map_err(|e| format!("st_tags update: {}", why(&e)))?;
     for (name, count) in &usage {
         tx.execute(
-            "INSERT INTO st_tags (id, tagid, tag_name, tag_class, data_type, usage_by_project, usage_count)
-             SELECT t.id, t.tag_id, t.tag_name, t.tag_type, t.data_type, jsonb_build_object($1::text, $3::int), $3::int
+            "INSERT INTO st_tags (id, tagid, tag_name, tag_class, data_type, protocol, usage_by_project, usage_count)
+             SELECT t.id, t.tag_id, t.tag_name, t.tag_type, t.data_type,
+                    (SELECT s.protocol_type FROM scada_master_tags s WHERE s.tag_name = t.tag_name LIMIT 1),
+                    jsonb_build_object($1::text, $3::int), $3::int
              FROM tagmast t WHERE t.tag_name = $2
              ON CONFLICT (id) DO UPDATE SET
+                 protocol = EXCLUDED.protocol,
                  usage_by_project = st_tags.usage_by_project || jsonb_build_object($1::text, $3::int),
                  usage_count = coalesce((SELECT sum(v::int) FROM jsonb_each_text(st_tags.usage_by_project || jsonb_build_object($1::text, $3::int)) e(k, v)), 0)",
             &[&project_id, name, count],
         )
-        .map_err(|e| format!("st_tags upsert: {e}"))?;
+        .map_err(|e| format!("st_tags upsert: {}", why(&e)))?;
     }
     // Tags this project used before but no longer does: drop its slice.
     tx.execute(
@@ -331,9 +340,9 @@ pub fn reconcile(project_id: &str, programs: &[ProgramSource], available: &[Stri
          WHERE jsonb_exists(usage_by_project, $1) AND NOT (tag_name = ANY($2))",
         &[&project_id, &used_names],
     )
-    .map_err(|e| format!("st_tags prune: {e}"))?;
-    tx.execute("DELETE FROM st_tags WHERE usage_count <= 0", &[]).map_err(|e| format!("st_tags cleanup: {e}"))?;
-    tx.commit().map_err(|e| format!("st_tags commit: {e}"))?;
+    .map_err(|e| format!("st_tags prune: {}", why(&e)))?;
+    tx.execute("DELETE FROM st_tags WHERE usage_count <= 0", &[]).map_err(|e| format!("st_tags cleanup: {}", why(&e)))?;
+    tx.commit().map_err(|e| format!("st_tags commit: {}", why(&e)))?;
     Ok(())
 }
 
@@ -353,7 +362,7 @@ pub fn seed(host: &Host) {
                 host.seed_tag_values(values);
             }
         }
-        Err(e) => eprintln!("[tags] couldn't seed tag values: {e}"),
+        Err(e) => eprintln!("[tags] couldn't seed tag values: {}", why(&e)),
     }
 }
 
@@ -377,7 +386,7 @@ pub fn snapshot(host: Arc<Host>) {
             &[&names, &nums],
         );
         if let Err(e) = done {
-            eprintln!("[tags] couldn't snapshot tag values: {e}");
+            eprintln!("[tags] couldn't snapshot tag values: {}", why(&e));
         }
     }
 }
@@ -394,8 +403,8 @@ pub fn release(project_id: &str) -> Result<(), String> {
              WHERE jsonb_exists(usage_by_project, $1)",
             &[&project_id],
         )
-        .map_err(|e| format!("st_tags release: {e}"))?;
-    client.execute("DELETE FROM st_tags WHERE usage_count <= 0", &[]).map_err(|e| format!("st_tags release cleanup: {e}"))?;
+        .map_err(|e| format!("st_tags release: {}", why(&e)))?;
+    client.execute("DELETE FROM st_tags WHERE usage_count <= 0", &[]).map_err(|e| format!("st_tags release cleanup: {}", why(&e)))?;
     Ok(())
 }
 
