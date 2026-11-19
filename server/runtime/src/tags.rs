@@ -129,13 +129,13 @@ fn names_by_id() -> Result<HashMap<String, String>, String> {
 
 /// One SCADA message → (tag name, value) for the tags known in `names`; the IDs it didn't
 /// know. Two formats: `{"type":"st_tags","tags":[{"tag_id","value"}]}` (or the older
-/// `"type":"ScriptTagValues"`)
+/// `"type":"ScriptTagValues"`, or the SCADA's ST server's `"type":"STTagValues"`)
 /// and a screen's `{"screen_id":23,"data":[{"TagID","Value"}]}`. Other messages give nothing.
 // ponytail: values are taken as engineering values; apply scale_factor here if the SCADA
 // turns out to send raw register values.
 fn tag_values(text: &str, names: &HashMap<String, String>) -> (Vec<(String, f64)>, Vec<String>) {
     let Ok(message) = serde_json::from_str::<serde_json::Value>(text) else { return Default::default() };
-    let (tags, id_key, value_key) = if message["type"] == "st_tags" || message["type"] == "ScriptTagValues" {
+    let (tags, id_key, value_key) = if ["st_tags", "ScriptTagValues", "STTagValues"].iter().any(|t| message["type"] == *t) {
         (&message["tags"], "tag_id", "value")
     } else if !message["screen_id"].is_null() {
         (&message["data"], "TagID", "Value")
@@ -181,7 +181,14 @@ pub fn listen(url: &str, host: Arc<Host>) {
         };
         match tungstenite::connect(url) {
             Ok((mut ws, _)) => {
-                eprintln!("[scada] connected to {url} ({} tags known)", names.len());
+                // The SCADA's ST server sends nothing until the runtime says it is connected.
+                let hello = r#"{"type":"runtime","status":"connected"}"#;
+                if let Err(e) = ws.send(tungstenite::Message::Text(hello.into())) {
+                    report(format!("connected to {url} but couldn't say so: {e}"));
+                    thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                eprintln!("[scada] connected to {url}, receiving live values ({} tags known)", names.len());
                 metrics::SCADA_CONNECTED.store(1, Relaxed);
                 let mut warned = false;
                 let mut last_refresh = std::time::Instant::now();
@@ -434,6 +441,11 @@ mod tests {
         assert_eq!(tag_values(script, &names), (vec![("T1".to_string(), 1.5)], vec!["zzz".to_string()]));
         let st = r#"{"type":"st_tags","tags":[{"tag_id":"abc","value":true}]}"#;
         assert_eq!(tag_values(st, &names), (vec![("T1".to_string(), 1.0)], vec![]));
+        // The SCADA ST server's message (tag_id = st_tags.tagid)
+        let st = r#"{"type":"STTagValues","ST_id":"ALL","tag_count":1,"tags":[{"tag_id":"ABC","protocol":"Modbus TCP","register_address":16,"value":579}]}"#;
+        assert_eq!(tag_values(st, &names), (vec![("T1".to_string(), 579.0)], vec![]));
+        let st = r#"{"type":"st_tags","tags":[{"tag_id":"abc","value":true}]}"#;
+        assert_eq!(tag_values(st, &names), (vec![("T1".to_string(), 1.0)], vec![]));
         let screen =r#"{"screen_name":"Screen 23","screen_id":23,"data":[{"TagID":"abc","RegAddress":633,"FunctionType":"HoldingRegister","Value":9407.000000}]}"#;
         assert_eq!(tag_values(screen, &names), (vec![("T1".to_string(), 9407.0)], vec![]));
         assert_eq!(tag_values(r#"{"hello":1}"#, &names), Default::default());
@@ -446,6 +458,14 @@ mod tests {
         assert_eq!(tag_values(wrong, &names), (vec![], vec!["abc".to_string()]));
     }
 }
+
+
+
+
+
+
+
+
 
 
 
