@@ -20,7 +20,17 @@ use myplc_core::runtime::{Runtime, ScanOutcome, Stop};
 use myplc_core::{load_on_engine_stack, ENGINE_STACK_BYTES, VALID_SUFFIX};
 
 const DEFAULT_SCAN_MS: u64 = 100;
-const MIN_SCAN_MS: u64 = 10;
+const MIN_SCAN_MS: u64 = 1;
+
+/// The scan interval when a project doesn't give one: `MYPLC_SCAN_MS`, else 100 ms.
+fn default_scan_ms() -> u64 {
+    std::env::var("MYPLC_SCAN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_SCAN_MS)
+}
+
+/// Tag values that arrived since the last scan, by name. The readers (Modbus, SCADA,
+/// data_log) only lock this, never the host, so they never hold up a scan; the scan takes
+/// the whole batch in one swap.
+type Pending = Arc<Mutex<HashMap<String, f64>>>;
 const MAX_SCAN_MS: u64 = 10_000;
 
 struct Inner {
@@ -44,6 +54,7 @@ struct Inner {
     /// The latest SCADA tag values by name (see `Host::set_tag_values`), also given to the
     /// next project loaded.
     tag_values: HashMap<String, f64>,
+    pending: Pending,
 }
 
 /// Sees the state after each scan that completed or failed; returning false asks the host
@@ -52,6 +63,17 @@ struct Inner {
 pub type ScanObserver = Box<dyn FnMut(&RuntimeState) -> bool + Send>;
 
 impl Inner {
+    /// Move the tag values that arrived meanwhile into the PLC (and `tag_values`).
+    fn apply_pending(&mut self) {
+        let values = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|p| p.into_inner()));
+        if let Some(runtime) = self.runtime.as_mut() {
+            for (name, value) in &values {
+                runtime.set_tag(name, *value);
+            }
+        }
+        self.tag_values.extend(values);
+    }
+
     fn state(&self) -> RuntimeState {
         let engine = self.runtime.as_ref().map(Runtime::state).unwrap_or_default();
         RuntimeState::from_engine(self.status, self.scan_time_ms, engine, self.io.points().to_vec(), self.error.clone())
@@ -69,6 +91,7 @@ impl Inner {
     /// (`stop`): the PLC is then PAUSED with the scan half done. A failing program stops
     /// the PLC (outputs go to their safe state). Returns whether the PLC can still scan.
     fn scan(&mut self, stop: Stop) -> bool {
+        self.apply_pending(); // READ INPUTS includes the newest tag values
         let Some(runtime) = self.runtime.as_mut() else { return false };
         let cycle_ms = i64::try_from(self.scan_time_ms).unwrap_or(i64::MAX);
         let io = &mut self.io;
@@ -125,6 +148,7 @@ fn lock(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
 
 pub struct Host {
     inner: Arc<Mutex<Inner>>,
+    pending: Pending,
 }
 
 impl Default for Host {
@@ -135,24 +159,29 @@ impl Default for Host {
 
 impl Host {
     pub fn new() -> Self {
+        let pending = Pending::default();
         Self {
+            pending: Arc::clone(&pending),
             inner: Arc::new(Mutex::new(Inner {
                 runtime: None,
                 context: None,
                 io: IoImage::new(&io::CONFIG),
                 status: RuntimeStatus::Stopped,
-                scan_time_ms: DEFAULT_SCAN_MS,
+                scan_time_ms: default_scan_ms().clamp(MIN_SCAN_MS, MAX_SCAN_MS),
                 error: None,
                 breakpoints: Vec::new(),
                 generation: 0,
                 observer: None,
                 tag_values: HashMap::new(),
+                pending,
             })),
         }
     }
 
     pub fn state(&self) -> RuntimeState {
-        lock(&self.inner).state()
+        let mut inner = lock(&self.inner);
+        inner.apply_pending(); // the monitor shows the newest values even while stopped
+        inner.state()
     }
 
     /// Live values for some SCADA tags (name, value) from the SCADA; programs see them from the
@@ -169,20 +198,16 @@ impl Host {
     }
 
     fn apply_tag_values(&self, values: Vec<(String, f64)>) {
-        let mut inner = lock(&self.inner);
-        if let Some(runtime) = inner.runtime.as_mut() {
-            for (name, value) in &values {
-                runtime.set_tag(name, *value);
-            }
-        }
-        inner.tag_values.extend(values);
+        self.pending.lock().unwrap_or_else(|p| p.into_inner()).extend(values);
     }
 
     /// Every tag's latest value, for the durable snapshot (see `tags::snapshot`). Only used
     /// tags have a value, so this is small; the `_VALID` flags are per-session, not saved.
     // ponytail: a real tag whose own name ends in `_VALID` isn't snapshotted; rename it if that matters.
     pub fn tag_values_snapshot(&self) -> Vec<(String, f64)> {
-        lock(&self.inner)
+        let mut inner = lock(&self.inner);
+        inner.apply_pending();
+        inner
             .tag_values
             .iter()
             .filter(|(name, _)| !name.ends_with(VALID_SUFFIX))
@@ -266,12 +291,13 @@ impl Host {
             }
         };
         runtime.set_breakpoints(&inner.breakpoint_pairs());
+        inner.apply_pending();
         for (name, value) in &inner.tag_values {
             runtime.set_tag(name, *value);
         }
         inner.runtime = Some(runtime);
         inner.context = Some(context);
-        inner.scan_time_ms = scan_time_ms.unwrap_or(DEFAULT_SCAN_MS).clamp(MIN_SCAN_MS, MAX_SCAN_MS);
+        inner.scan_time_ms = scan_time_ms.unwrap_or_else(default_scan_ms).clamp(MIN_SCAN_MS, MAX_SCAN_MS);
         let state = inner.state();
         drop(inner); // don't hold the host lock across the usage-tracking database write
         // Option A: record which SCADA tags this project uses (and how many times) in st_tags.
@@ -308,6 +334,7 @@ impl Host {
     fn spawn_scan_loop(&self, generation: u64) -> std::io::Result<()> {
         let inner = Arc::clone(&self.inner);
         let mut last_start: Option<Instant> = None;
+        let mut next = Instant::now();
         let scan_loop = move || loop {
             // One scan = READ INPUTS → EXECUTE → UPDATE OUTPUTS, under the lock, so every
             // scan sees a consistent input image and commands never see half a scan.
@@ -330,7 +357,15 @@ impl Host {
                 }
                 state.scan_time_ms
             };
-            thread::sleep(Duration::from_millis(interval)); // WAIT, then next scan
+            // WAIT until the next scan is due: a fixed schedule, so the time a scan takes
+            // doesn't add up. A late scan starts right away, without trying to catch up.
+            next += Duration::from_millis(interval);
+            let now = Instant::now();
+            if next > now {
+                thread::sleep(next - now);
+            } else {
+                next = now;
+            }
         };
         thread::Builder::new().name("plc-scan".into()).stack_size(ENGINE_STACK_BYTES).spawn(scan_loop).map(|_| ())
     }
@@ -420,7 +455,8 @@ mod tests {
         host.seed_tag_values(vec![("A".into(), 1.0)]); // restored from the snapshot
         host.set_tag_values(vec![("B".into(), 2.0)]); // live from the SCADA
         {
-            let inner = lock(&host.inner);
+            let mut inner = lock(&host.inner);
+            inner.apply_pending();
             assert_eq!(inner.tag_values.get("A_VALID"), None); // stale until a live value arrives
             assert_eq!(inner.tag_values.get("B_VALID"), Some(&1.0));
         }

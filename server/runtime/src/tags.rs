@@ -367,9 +367,12 @@ pub fn seed(host: &Host) {
 /// Forever: every `SNAPSHOT_EVERY`, write the host's current tag values to `st_tags.last_value`
 /// in one batch, so they survive a restart. Writes only `st_tags`.
 pub fn snapshot(host: Arc<Host>) {
+    let mut saved: HashMap<String, f64> = HashMap::new();
     loop {
         thread::sleep(SNAPSHOT_EVERY);
-        let values = host.tag_values_snapshot();
+        // Only the values that changed since the last save that worked.
+        let values: Vec<(String, f64)> =
+            host.tag_values_snapshot().into_iter().filter(|(n, v)| saved.get(n) != Some(v)).collect();
         if values.is_empty() {
             continue;
         }
@@ -383,8 +386,9 @@ pub fn snapshot(host: Arc<Host>) {
              WHERE s.tag_name = v.name",
             &[&names, &nums],
         );
-        if let Err(e) = done {
-            eprintln!("[tags] couldn't snapshot tag values: {}", why(&e));
+        match done {
+            Ok(_) => saved.extend(values),
+            Err(e) => eprintln!("[tags] couldn't snapshot tag values: {}", why(&e)),
         }
     }
 }
@@ -440,4 +444,7 @@ mod tests {
         assert_eq!(tag_values(wrong, &names), (vec![], vec!["abc".to_string()]));
     }
 }
+
+
+
 
