@@ -19,6 +19,8 @@ ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS last_value_at timestamptz;
 
 -- The tag's protocol id, from tagmast.protocol_type.
 ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS protocol_id character varying(100);
+-- Its name (Modbus_TCP, IEC104_Master, …), from control_table group 4.
+ALTER TABLE public.st_tags ADD COLUMN IF NOT EXISTS protocol_type character varying(100);
 
 COMMIT;
 
