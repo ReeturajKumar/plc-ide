@@ -1,8 +1,7 @@
-//! The SCADA tag database (PostgreSQL): the tag list from `st_tags` (see
-//! `server/sql/st_tags.sql`), the type names from `control_table` (group 5: 54 Binary,
+//! The SCADA tag database (PostgreSQL): the tag list from `tagmast` (the tags programs use are
+//! tracked in `st_tags`, see `server/sql/st_tags_merge.sql`), the type names from `control_table` (group 5: 54 Binary,
 //! 57 Float ABCD, …), and details from `scada_master_tags` where it has the tag. Live values come from the
-//! SCADA's WebSocket if `MYPLC_SCADA_URL` is set (`listen`; `mock-scada/` stands in for
-//! it), otherwise from `data_log` (`poll`).
+//! SCADA's WebSocket if `MYPLC_SCADA_URL` is set (`listen`), otherwise from `data_log` (`poll`).
 //!
 //! Connection settings come from the environment, so changing them needs no code change:
 //! `MYPLC_DB_HOST` (default localhost), `MYPLC_DB_PORT` (5432), `MYPLC_DB_NAME`,
@@ -47,7 +46,7 @@ pub fn load_env_file() {
     }
 }
 
-fn connect() -> Result<Client, String> {
+pub(crate) fn connect() -> Result<Client, String> {
     let setting = |key: &str| env::var(key).ok().filter(|v| !v.is_empty());
     let name = setting("MYPLC_DB_NAME").ok_or("No tag database configured: set MYPLC_DB_NAME (and the other MYPLC_DB_* settings) in server/.env")?;
     let host = setting("MYPLC_DB_HOST").unwrap_or_else(|| "localhost".into());
@@ -70,7 +69,7 @@ fn connect() -> Result<Client, String> {
 /// Whether a tag database is configured at all.
 /// A database error's own message ("column \"x\" does not exist"); the error's Display is
 /// only "db error".
-fn why(e: &postgres::Error) -> String {
+pub(crate) fn why(e: &postgres::Error) -> String {
     e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().to_string())
 }
 
@@ -238,8 +237,8 @@ pub fn listen(url: &str, host: Arc<Host>) {
 fn latest_values(client: &mut Client) -> Result<Vec<(String, f64)>, String> {
     let rows = client
         .query(
-            "SELECT DISTINCT ON (tag_name) tag_name, curr_value FROM data_log
-             WHERE curr_value IS NOT NULL ORDER BY tag_name, cdttime DESC",
+            "SELECT DISTINCT ON (tag_name) tag_name, currvalue::float8 FROM data_log
+             WHERE currvalue IS NOT NULL ORDER BY tag_name, cdttime DESC",
             &[],
         )
         .map_err(|e| format!("Can't read tag values from data_log: {}", why(&e)))?;
@@ -441,3 +440,4 @@ mod tests {
         assert_eq!(tag_values(wrong, &names), (vec![], vec!["abc".to_string()]));
     }
 }
+

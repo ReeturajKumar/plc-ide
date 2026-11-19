@@ -7,14 +7,10 @@ Server run   : cd server && cargo run -- --listen 127.0.0.1:5020
 Server build : cd server && cargo build --release
 ```
 
-## Mock SCADA (live tag values for testing)
+## Live tag values
 
-```
-Run          : cd mock-scada && cargo run
-```
-
-The backend connects to `MYPLC_SCADA_URL` in `server/.env` (`ws://127.0.0.1:6000` = the mock).
-Put the real system's address there later.
+Set `MYPLC_SCADA_URL` in `server/.env` to the SCADA's WebSocket to receive live values.
+Left empty, the backend reads the newest value of each tag from the `data_log` table.
 
 ## Monitoring (Prometheus + Grafana)
 

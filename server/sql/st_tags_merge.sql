@@ -28,7 +28,7 @@ ALTER TABLE public.st_tags DROP COLUMN IF EXISTS protocol;   -- replaced by prot
 
 -- Fills the protocol id for rows that are already there (new rows get it from the backend)
 UPDATE public.st_tags st SET protocol_id = t.protocol_type
-FROM public.tagmast t WHERE t.id::text = st.id AND st.protocol_id IS NULL;
+FROM public.tagmast t WHERE t.id::text = st.id::text AND st.protocol_id IS NULL;
 
 -- Brings older versions of the table up to date
 -- tagmast.id is an integer in some databases and a uuid in others: text holds both.

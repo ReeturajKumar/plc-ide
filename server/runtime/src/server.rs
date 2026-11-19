@@ -348,11 +348,14 @@ pub fn serve(config: ServerConfig) -> ExitCode {
         }
     };
     let host = Arc::new(Host::new());
-    // Live tag values: pushed by the SCADA over a WebSocket if MYPLC_SCADA_URL is set,
-    // otherwise read from the tag database's data_log.
+    // Live tag values: pushed by the SCADA over a WebSocket if MYPLC_SCADA_URL is set, else
+    // read from the Modbus devices in the tag database if MYPLC_MODBUS=1, else from data_log.
     if let Some(url) = crate::tags::scada_url() {
         let host = Arc::clone(&host);
         thread::spawn(move || crate::tags::listen(&url, host));
+    } else if crate::modbus::enabled() && crate::tags::configured() {
+        let host = Arc::clone(&host);
+        thread::spawn(move || crate::modbus::poll(host));
     } else if crate::tags::configured() {
         let host = Arc::clone(&host);
         thread::spawn(move || crate::tags::poll(host));
