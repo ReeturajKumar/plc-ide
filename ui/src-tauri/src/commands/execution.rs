@@ -12,8 +12,8 @@ pub fn standard_function_blocks() -> Vec<FbSummary> {
 }
 
 /// Compile without running: every program's errors and the I/O mapping errors. `tags`:
-/// the SCADA tags (name, type) the programs may read.
+/// the SCADA tags (name, type, writable) the programs may use; only command tags are writable.
 #[tauri::command]
-pub fn compile_programs(programs: Vec<ProgramSource>, mappings: Vec<Mapping>, tags: Option<Vec<(String, DataType)>>) -> CompileReport {
+pub fn compile_programs(programs: Vec<ProgramSource>, mappings: Vec<Mapping>, tags: Option<Vec<(String, DataType, bool)>>) -> CompileReport {
     myplc_core::compile(&programs, &mappings, &tags.unwrap_or_default())
 }

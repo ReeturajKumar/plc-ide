@@ -57,6 +57,8 @@ export interface Tag {
     scaleOffset: number;
     /** The SCADA's tag class (from st_tags). */
     tagClass: string;
+    /** A command tag (AnalogCommand / DigitalCommand): programs may write it, and the value is sent to the SCADA. */
+    writable?: boolean;
 }
 
 /** Anything the runtime sends: only a RESPONSE answers a request. */

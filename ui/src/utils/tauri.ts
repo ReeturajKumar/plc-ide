@@ -5,7 +5,7 @@ import type { FileNode } from "../types/project";
 /** The compiler queries, answered by the desktop app (nothing runs). */
 export const compilerTransport = {
     /** Compile without running: every program's errors and the I/O mapping errors. */
-    compile: (programs: ProgramSource[], mappings: IoMapping[], tags: [string, string][]) =>
+    compile: (programs: ProgramSource[], mappings: IoMapping[], tags: [string, string, boolean][]) =>
         invoke<CompileReport>("compile_programs", { programs, mappings, tags }),
     /** The standard function blocks (TON, CTU, …) with their inputs and outputs. */
     standardFunctionBlocks: () => invoke<FbSummary[]>("standard_function_blocks"),

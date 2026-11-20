@@ -159,6 +159,10 @@ pub struct Tag {
     pub scale_offset: f64,
     /// The SCADA's tag class (from `st_tags`).
     pub tag_class: String,
+    /// A command tag (AnalogCommand / DigitalCommand): programs may write it, and what they
+    /// write is sent to the SCADA. Every other tag is read-only.
+    #[serde(default)]
+    pub writable: bool,
 }
 
 impl Response {

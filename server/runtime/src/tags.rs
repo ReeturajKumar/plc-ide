@@ -159,8 +159,34 @@ fn tag_values(text: &str, names: &HashMap<String, String>) -> (Vec<(String, f64)
     (values, unknown)
 }
 
+/// How long a wait for the SCADA's next message may last before the program's changed
+/// outputs are sent (so outputs go out within this, even while no values arrive).
+const OUTPUT_EVERY: Duration = Duration::from_millis(20);
+
+/// Send the command tag values the program changed to the SCADA (see `outputs`).
+fn send_outputs(ws: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, host: &Host, known: &mut HashMap<String, crate::outputs::Output>) -> Result<(), tungstenite::Error> {
+    let changes = host.take_outputs();
+    if changes.is_empty() {
+        return Ok(());
+    }
+    // A command tag added since the last look: refresh what the SCADA needs about it.
+    if changes.iter().any(|(name, _)| !known.contains_key(&name.to_uppercase())) {
+        if let Ok(fresh) = crate::outputs::load() {
+            *known = fresh;
+        }
+    }
+    if let Some(text) = crate::outputs::message(&changes, known) {
+        let list: Vec<String> = changes.iter().map(|(n, v)| format!("{n}={v}")).collect();
+        eprintln!("[scada] sent outputs: {}
+[scada] JSON: {text}", list.join(", "));
+        ws.send(tungstenite::Message::Text(text.into()))?;
+    }
+    Ok(())
+}
+
 /// Forever: receive the SCADA's tag values over its WebSocket at `url` and give them to
-/// `host`. Reconnects (every 2 s) if the connection drops; tags keep their last values.
+/// `host`, and send it the command tags the program writes. Reconnects (every 2 s) if the
+/// connection drops; tags keep their last values.
 pub fn listen(url: &str, host: Arc<Host>) {
     let mut last_error = String::new();
     let mut report = |e: String| {
@@ -190,9 +216,24 @@ pub fn listen(url: &str, host: Arc<Host>) {
                 }
                 eprintln!("[scada] connected to {url}, receiving live values ({} tags known)", names.len());
                 metrics::SCADA_CONNECTED.store(1, Relaxed);
+                // Commands the program made while disconnected are dropped, never sent late:
+                // only changes from now on go out.
+                host.take_outputs();
+                let mut known = crate::outputs::load().unwrap_or_else(|e| {
+                    eprintln!("[scada] {e}");
+                    HashMap::new()
+                });
+                if let tungstenite::stream::MaybeTlsStream::Plain(s) = ws.get_ref() {
+                    s.set_read_timeout(Some(OUTPUT_EVERY)).ok();
+                }
                 let mut warned = false;
                 let mut last_refresh = std::time::Instant::now();
                 loop {
+                    if let Err(e) = send_outputs(&mut ws, &host, &mut known) {
+                        metrics::SCADA_CONNECTED.store(0, Relaxed);
+                        report(format!("connection to {url} lost while sending outputs: {e}"));
+                        break;
+                    }
                     match ws.read() {
                         Ok(tungstenite::Message::Text(text)) => {
                             let start = std::time::Instant::now();
@@ -224,6 +265,8 @@ pub fn listen(url: &str, host: Arc<Host>) {
                             metrics::SCADA_PROCESS_US.store(start.elapsed().as_micros() as u64, Relaxed);
                         }
                         Ok(_) => {}
+                        // Nothing arrived within OUTPUT_EVERY: go round and send outputs.
+                        Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
                         Err(e) => {
                             metrics::SCADA_CONNECTED.store(0, Relaxed);
                             metrics::SCADA_RECONNECTS.fetch_add(1, Relaxed);
@@ -269,14 +312,23 @@ pub fn load() -> Result<Vec<Tag>, String> {
             &[],
         )
         .map_err(|e| format!("Can't read the tags from tagmast: {}", why(&e)))?;
+    // Command tags are the writable ones; without them every tag is simply read-only.
+    let outputs = crate::outputs::load().unwrap_or_else(|e| {
+        eprintln!("[tags] {e} (no tag is writable)");
+        Default::default()
+    });
     Ok(rows
         .iter()
         .map(|row| {
             // control_table's name for the type ("Binary", "Float ABCD", "Signed", …).
             let scada_type: String = row.get(2);
-            let boolean = ["binary", "boolean"].iter().any(|b| scada_type.eq_ignore_ascii_case(b));
+            let name: String = row.get(0);
+            let output = outputs.get(&name.to_uppercase());
+            let boolean = ["binary", "boolean"].iter().any(|b| scada_type.eq_ignore_ascii_case(b))
+                || output.is_some_and(|o| crate::outputs::is_digital(&o.class));
             Tag {
-                name: row.get(0),
+                writable: output.is_some(),
+                name,
                 description: row.get(1),
                 // Numbers are engineering values after scaling (×0.1 etc.), so REAL.
                 st_type: if boolean { DataType::Bool } else { DataType::Real },
@@ -392,7 +444,7 @@ pub fn snapshot(host: Arc<Host>) {
         let done = client.execute(
             "UPDATE st_tags s SET last_value = v.val, last_value_at = now()
              FROM (SELECT unnest($1::text[]) AS name, unnest($2::float8[]) AS val) v
-             WHERE s.tag_name = v.name",
+             WHERE upper(s.tag_name) = upper(v.name)",
             &[&names, &nums],
         );
         match done {
@@ -435,6 +487,26 @@ mod tests {
     }
 
     #[test]
+    fn sends_changed_outputs_in_the_scada_format() {
+        use crate::outputs::Output;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(s).unwrap();
+            ws.read().unwrap().to_string()
+        });
+        let (mut ws, _) = tungstenite::connect(url.as_str()).unwrap();
+        let mut known = HashMap::from([("CMD".to_string(), Output { tag_id: "abc".into(), address_key: "Register Address", address: Some(20), protocol: "Modbus_TCP".into(), class: "AnalogCommand".into() })]);
+        let host = Host::new();
+        host.outbox.lock().unwrap().insert("CMD".into(), 340.0);
+        send_outputs(&mut ws, &host, &mut known).unwrap();
+        let got: serde_json::Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+        assert_eq!(got, serde_json::json!({"type":"STTagValues","total_data":1,"data":[{"TagID":"abc","Register Address":20,"Value":340,"ProtocolType":"Modbus_TCP","TagClass":"AnalogCommand"}]}));
+        assert!(host.take_outputs().is_empty()); // sent once, not again
+    }
+
+    #[test]
     fn reads_script_and_screen_messages() {
         let names = HashMap::from([("abc".to_string(), "T1".to_string())]);
         let script = r#"{"type":"ScriptTagValues","script_id":"117","tags":[{"tag_id":"ABC","register_address":5,"value":1.5},{"tag_id":"zzz","value":2}]}"#;
@@ -458,6 +530,16 @@ mod tests {
         assert_eq!(tag_values(wrong, &names), (vec![], vec!["abc".to_string()]));
     }
 }
+
+
+
+
+
+
+
+
+
+
 
 
 

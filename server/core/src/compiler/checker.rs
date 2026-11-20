@@ -709,7 +709,7 @@ impl Checker<'_> {
                             ErrorKind::InvalidAssignment,
                             *line,
                             *column,
-                            format!("Can't assign to '{target}': PLC inputs and SCADA tags are read-only in programs"),
+                            format!("Can't assign to '{target}': PLC inputs and SCADA tags are read-only in programs (only command tags can be written)"),
                         ));
                         None
                     }
@@ -760,7 +760,7 @@ impl Checker<'_> {
                 let root = root_variable(target);
                 let at = |kind: ErrorKind, message: String| err(kind, *line, *column, message);
                 match symbols.get(root).map(|s| s.read_only) {
-                    Some(true) => self.report(at(ErrorKind::InvalidAssignment, format!("Can't assign to '{root}': PLC inputs and SCADA tags are read-only in programs"))),
+                    Some(true) => self.report(at(ErrorKind::InvalidAssignment, format!("Can't assign to '{root}': PLC inputs and SCADA tags are read-only in programs (only command tags can be written)"))),
                     Some(false) => symbols.mark_written(root),
                     None => {
                         self.report(at(ErrorKind::UndeclaredVariable, symbols.undeclared(root, "variable")));

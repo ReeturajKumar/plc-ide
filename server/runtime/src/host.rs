@@ -4,7 +4,7 @@
 //! itself (scan cycle, debugger, function blocks) is `myplc_core`'s `Runtime`; this only
 //! decides when it scans.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::sync::atomic::Ordering::Relaxed;
@@ -31,6 +31,9 @@ fn default_scan_ms() -> u64 {
 /// data_log) only lock this, never the host, so they never hold up a scan; the scan takes
 /// the whole batch in one swap.
 type Pending = Arc<Mutex<HashMap<String, f64>>>;
+
+/// Command tag values the program changed, waiting to be sent to the SCADA (latest per tag).
+type Outbox = Arc<Mutex<HashMap<String, f64>>>;
 const MAX_SCAN_MS: u64 = 10_000;
 
 struct Inner {
@@ -55,6 +58,12 @@ struct Inner {
     /// next project loaded.
     tag_values: HashMap<String, f64>,
     pending: Pending,
+    /// The loaded project's command tags (upper case): the program owns them, so values
+    /// arriving from the SCADA never overwrite them.
+    outputs: HashSet<String>,
+    /// Each command tag the program uses → the value last passed on (or its starting value).
+    sent: HashMap<String, f64>,
+    outbox: Outbox,
 }
 
 /// Sees the state after each scan that completed or failed; returning false asks the host
@@ -65,13 +74,36 @@ pub type ScanObserver = Box<dyn FnMut(&RuntimeState) -> bool + Send>;
 impl Inner {
     /// Move the tag values that arrived meanwhile into the PLC (and `tag_values`).
     fn apply_pending(&mut self) {
-        let values = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|p| p.into_inner()));
+        let mut values = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|p| p.into_inner()));
+        values.retain(|name, _| !self.outputs.contains(&name.to_uppercase()));
         if let Some(runtime) = self.runtime.as_mut() {
             for (name, value) in &values {
                 runtime.set_tag(name, *value);
             }
         }
         self.tag_values.extend(values);
+    }
+
+    /// Start tracking the command tags from their current values: only later changes are sent
+    /// (they command real devices, so a load or restart never sends anything by itself).
+    fn reset_sent(&mut self) {
+        let Some(runtime) = self.runtime.as_ref() else { return };
+        self.sent = self.outputs.iter().filter_map(|name| Some((name.clone(), runtime.tag_value(name)?))).collect();
+    }
+
+    /// After a scan: queue every command tag the program changed.
+    fn collect_outputs(&mut self) {
+        let Some(runtime) = self.runtime.as_ref() else { return };
+        let mut changed = Vec::new();
+        for (name, last) in &mut self.sent {
+            if let Some(value) = runtime.tag_value(name).filter(|v| v != last) {
+                *last = value;
+                changed.push((name.clone(), value));
+            }
+        }
+        if !changed.is_empty() {
+            self.outbox.lock().unwrap_or_else(|p| p.into_inner()).extend(changed);
+        }
     }
 
     fn state(&self) -> RuntimeState {
@@ -100,7 +132,10 @@ impl Inner {
         // silently. The default panic hook still logs it to stderr for diagnosis.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.scan_cycle(io, cycle_ms, stop)));
         let can_scan = match outcome {
-            Ok(ScanOutcome::Completed) => true,
+            Ok(ScanOutcome::Completed) => {
+                self.collect_outputs();
+                true
+            }
             Ok(ScanOutcome::Paused(_)) => {
                 self.status = RuntimeStatus::Paused;
                 return true; // mid-scan: not finished, nothing to report yet
@@ -149,6 +184,7 @@ fn lock(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
 pub struct Host {
     inner: Arc<Mutex<Inner>>,
     pending: Pending,
+    pub(crate) outbox: Outbox,
 }
 
 impl Default for Host {
@@ -160,8 +196,10 @@ impl Default for Host {
 impl Host {
     pub fn new() -> Self {
         let pending = Pending::default();
+        let outbox = Outbox::default();
         Self {
             pending: Arc::clone(&pending),
+            outbox: Arc::clone(&outbox),
             inner: Arc::new(Mutex::new(Inner {
                 runtime: None,
                 context: None,
@@ -174,6 +212,9 @@ impl Host {
                 observer: None,
                 tag_values: HashMap::new(),
                 pending,
+                outputs: HashSet::new(),
+                sent: HashMap::new(),
+                outbox,
             })),
         }
     }
@@ -201,16 +242,24 @@ impl Host {
         self.pending.lock().unwrap_or_else(|p| p.into_inner()).extend(values);
     }
 
+    /// The command tag values the program changed since the last call (name, value), to send
+    /// to the SCADA.
+    pub fn take_outputs(&self) -> Vec<(String, f64)> {
+        std::mem::take(&mut *self.outbox.lock().unwrap_or_else(|p| p.into_inner())).into_iter().collect()
+    }
+
     /// Every tag's latest value, for the durable snapshot (see `tags::snapshot`). Only used
     /// tags have a value, so this is small; the `_VALID` flags are per-session, not saved.
     // ponytail: a real tag whose own name ends in `_VALID` isn't snapshotted; rename it if that matters.
     pub fn tag_values_snapshot(&self) -> Vec<(String, f64)> {
         let mut inner = lock(&self.inner);
         inner.apply_pending();
+        // Live values from the SCADA, plus what the program last wrote to its command tags.
         inner
             .tag_values
             .iter()
-            .filter(|(name, _)| !name.ends_with(VALID_SUFFIX))
+            .filter(|(name, _)| !name.ends_with(VALID_SUFFIX) && !inner.outputs.contains(&name.to_uppercase()))
+            .chain(&inner.sent)
             .map(|(name, value)| (name.clone(), *value))
             .collect()
     }
@@ -275,7 +324,8 @@ impl Host {
             Vec::new()
         });
         let available: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
-        let tags: Vec<_> = tags.into_iter().map(|t| (t.name, t.st_type)).collect();
+        let outputs: HashSet<String> = tags.iter().filter(|t| t.writable).map(|t| t.name.to_uppercase()).collect();
+        let tags: Vec<_> = tags.into_iter().map(|t| (t.name, t.st_type, t.writable)).collect();
         let loaded = load_on_engine_stack(programs, mappings, &tags);
         let mut inner = lock(&self.inner);
         inner.generation += 1;
@@ -291,11 +341,13 @@ impl Host {
             }
         };
         runtime.set_breakpoints(&inner.breakpoint_pairs());
+        inner.outputs = outputs;
         inner.apply_pending();
-        for (name, value) in &inner.tag_values {
+        for (name, value) in inner.tag_values.iter().filter(|(n, _)| !inner.outputs.contains(&n.to_uppercase())) {
             runtime.set_tag(name, *value);
         }
         inner.runtime = Some(runtime);
+        inner.reset_sent();
         inner.context = Some(context);
         inner.scan_time_ms = scan_time_ms.unwrap_or_else(default_scan_ms).clamp(MIN_SCAN_MS, MAX_SCAN_MS);
         let state = inner.state();
@@ -316,6 +368,7 @@ impl Host {
         let mut inner = lock(&self.inner);
         let Some(runtime) = inner.runtime.as_mut() else { return Err(rejected("Load a project before RUN.")) };
         runtime.reset();
+        inner.reset_sent();
         inner.generation += 1;
         inner.error = None;
         inner.io.reset_outputs();
@@ -382,6 +435,7 @@ impl Host {
         if let Some(runtime) = inner.runtime.as_mut() {
             runtime.reset();
         }
+        inner.reset_sent();
         inner.state()
     }
 
@@ -463,5 +517,31 @@ mod tests {
         let mut snap = host.tag_values_snapshot();
         snap.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(snap, vec![("A".to_string(), 1.0), ("B".to_string(), 2.0)]); // flags aren't saved
+    }
+
+    #[test]
+    fn program_changes_to_command_tags_are_queued_once() {
+        use myplc_core::compiler::ast::DataType;
+        let host = Host::new();
+        let source = "PROGRAM main VAR n : INT; END_VAR n := n + 1; IF MEAS > 10.0 THEN CMD := MEAS * 2.0; END_IF; TRIP := n >= 3; END_PROGRAM";
+        let programs = vec![ProgramSource { name: "main".into(), source: source.into() }];
+        let tags = vec![("MEAS".to_string(), DataType::Real, false), ("CMD".to_string(), DataType::Real, true), ("TRIP".to_string(), DataType::Bool, true)];
+        let (Some((runtime, context)), _) = load_on_engine_stack(&programs, &[], &tags) else { panic!("should compile") };
+        {
+            let mut inner = lock(&host.inner);
+            inner.outputs = ["CMD", "TRIP"].iter().map(|s| s.to_string()).collect();
+            inner.runtime = Some(runtime);
+            inner.context = Some(context);
+            inner.reset_sent();
+            inner.scan(Stop::Never);
+        }
+        assert_eq!(host.take_outputs(), vec![]); // nothing changed: nothing sent, not even the start values
+        host.set_tag_values(vec![("MEAS".into(), 20.0), ("CMD".into(), 999.0)]); // the SCADA can't overwrite CMD
+        lock(&host.inner).scan(Stop::Never);
+        assert_eq!(host.take_outputs(), vec![("CMD".to_string(), 40.0)]);
+        lock(&host.inner).scan(Stop::Never); // n = 3: TRIP goes TRUE; CMD unchanged, so not resent
+        assert_eq!(host.take_outputs(), vec![("TRIP".to_string(), 1.0)]);
+        lock(&host.inner).scan(Stop::Never);
+        assert_eq!(host.take_outputs(), vec![]);
     }
 }

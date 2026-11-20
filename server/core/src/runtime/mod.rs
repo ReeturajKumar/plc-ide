@@ -234,6 +234,16 @@ impl Runtime {
         self.tag_values.insert(tag_slot, value);
     }
 
+    /// SCADA tag `name`'s current value as a number (a BOOL is 1 / 0), e.g. what the program
+    /// wrote to a command tag. None if no program uses the tag.
+    pub fn tag_value(&self, name: &str) -> Option<f64> {
+        match self.memory.values.get(&slot(self.io_index, name))? {
+            Value::Bool(b) => Some(f64::from(u8::from(*b))),
+            Value::Real(r) => Some(*r),
+            _ => None,
+        }
+    }
+
     /// Write a variable that `program` declares, from outside; also an element, named as
     /// the monitor shows it (`Flags[2]`, `Pos.x`). The value must match its type.
     pub fn set_in(&mut self, program: &str, name: &str, value: Value) -> StResult<()> {

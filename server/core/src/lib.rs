@@ -24,14 +24,18 @@ pub const ENGINE_STACK_BYTES: usize = 8 * 1024 * 1024;
 /// snapshot. Programs guard actions with it, e.g. `IF TANK1_VALID AND TANK1 > 80 THEN …`.
 pub const VALID_SUFFIX: &str = "_VALID";
 
-/// The SCADA tags plus each one's `_VALID` flag (skipped if a real tag already has that name).
-fn with_validity_flags(tags: &[(String, DataType)]) -> Vec<(String, DataType)> {
-    let names: std::collections::HashSet<String> = tags.iter().map(|(n, _)| n.to_uppercase()).collect();
+/// A SCADA tag as programs see it: (name, type, writable). Only command tags are writable
+/// (what a program writes to them is sent to the SCADA); every other tag is read-only.
+pub type TagDecl = (String, DataType, bool);
+
+/// The SCADA tags plus each one's (read-only) `_VALID` flag (skipped if a real tag already has that name).
+fn with_validity_flags(tags: &[TagDecl]) -> Vec<TagDecl> {
+    let names: std::collections::HashSet<String> = tags.iter().map(|(n, ..)| n.to_uppercase()).collect();
     let flags = tags
         .iter()
-        .map(|(n, _)| format!("{n}{VALID_SUFFIX}"))
+        .map(|(n, ..)| format!("{n}{VALID_SUFFIX}"))
         .filter(|flag| !names.contains(&flag.to_uppercase()))
-        .map(|flag| (flag, DataType::Bool));
+        .map(|flag| (flag, DataType::Bool, false));
     tags.iter().cloned().chain(flags).collect()
 }
 
@@ -43,7 +47,7 @@ pub fn load(
     programs: &[ProgramSource],
     mappings: &[Mapping],
     config: &IoConfig,
-    tags: &[(String, DataType)],
+    tags: &[TagDecl],
 ) -> (Option<(Runtime, ProjectContext)>, CompileReport) {
     let (project, mut report) = compile_sources(programs, mappings, config, &with_validity_flags(tags));
     let Some(project) = project else { return (None, report) };
@@ -65,7 +69,7 @@ pub fn load(
 pub fn load_on_engine_stack(
     programs: &[ProgramSource],
     mappings: &[Mapping],
-    tags: &[(String, DataType)],
+    tags: &[TagDecl],
 ) -> (Option<(Runtime, ProjectContext)>, CompileReport) {
     let failed = |message: &str| CompileReport::failed(programs, message);
     thread::scope(|scope| {
@@ -83,7 +87,7 @@ pub fn load_on_engine_stack(
 
 /// Compile every program (lexer → parser → semantic analysis) and check the I/O mappings,
 /// without running anything.
-pub fn compile(programs: &[ProgramSource], mappings: &[Mapping], tags: &[(String, DataType)]) -> CompileReport {
+pub fn compile(programs: &[ProgramSource], mappings: &[Mapping], tags: &[TagDecl]) -> CompileReport {
     load_on_engine_stack(programs, mappings, tags).1
 }
 
@@ -97,7 +101,7 @@ mod tests {
     fn each_tag_gets_a_valid_flag_that_starts_false() {
         let source = "PROGRAM main VAR ok : BOOL; END_VAR ok := T_VALID; END_PROGRAM";
         let programs = vec![ProgramSource { name: "main".into(), source: source.into() }];
-        let tags = vec![("T".to_string(), DataType::Real)];
+        let tags = vec![("T".to_string(), DataType::Real, false)];
         let (loaded, report) = load(&programs, &[], &io::CONFIG, &tags);
         let (mut runtime, _) = loaded.unwrap_or_else(|| panic!("T_VALID should compile: {report:?}"));
         let mut image = io::IoImage::new(&io::CONFIG);
@@ -109,5 +113,22 @@ mod tests {
         runtime.set_tag("T_VALID", 1.0); // the host does this when a live value arrives
         runtime.scan_cycle(&mut image, 100, Stop::Never);
         assert_eq!(ok(&runtime), Some(Value::Bool(true)));
+    }
+
+    #[test]
+    fn only_command_tags_can_be_written() {
+        let tags = vec![("MEAS".to_string(), DataType::Real, false), ("CMD".to_string(), DataType::Real, true), ("TRIP".to_string(), DataType::Bool, true)];
+        let program = |body: &str| vec![ProgramSource { name: "main".into(), source: format!("PROGRAM main {body} END_PROGRAM") }];
+        // A measurement stays read-only.
+        let (loaded, report) = load(&program("MEAS := 1.0;"), &[], &io::CONFIG, &tags);
+        assert!(loaded.is_none(), "writing a measurement tag must not compile: {report:?}");
+        // A command tag takes what the program writes; the host reads it after the scan.
+        let (loaded, report) = load(&program("CMD := MEAS + 2.5; TRIP := TRUE;"), &[], &io::CONFIG, &tags);
+        let (mut runtime, _) = loaded.unwrap_or_else(|| panic!("command tags should be writable: {report:?}"));
+        runtime.set_tag("MEAS", 1.0);
+        runtime.scan_cycle(&mut io::IoImage::new(&io::CONFIG), 100, Stop::Never);
+        assert_eq!(runtime.tag_value("CMD"), Some(3.5));
+        assert_eq!(runtime.tag_value("TRIP"), Some(1.0));
+        assert_eq!(runtime.tag_value("NOPE"), None);
     }
 }

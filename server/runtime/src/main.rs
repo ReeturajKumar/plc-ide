@@ -36,6 +36,7 @@ use myplc_core::protocol::{self, ErrorCode, ProtocolError, RuntimeState};
 mod host;
 mod metrics;
 mod modbus;
+mod outputs;
 mod server;
 mod tags;
 

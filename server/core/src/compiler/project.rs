@@ -199,13 +199,14 @@ pub fn compile_project(
     type_decls: &[TypeDecl],
     mappings: &[Mapping],
     config: &IoConfig,
-    tags: &[(String, DataType)],
+    tags: &[crate::TagDecl],
 ) -> Result<CompiledProject, ProjectErrors> {
     let mapped_inputs = mapping::mapped_block_inputs(mappings, config);
-    // SCADA tags sit with the I/O addresses: every program can read them, none can write.
+    // SCADA tags sit with the I/O addresses: every program can read them; only command tags
+    // (writable) can be written.
     let mut io = config.symbols();
-    for (name, data_type) in tags {
-        io.declare_io(name, VarType::Elementary(*data_type), true);
+    for (name, data_type, writable) in tags {
+        io.declare_io(name, VarType::Elementary(*data_type), !writable);
     }
     let ProjectCheck { programs: results, function_blocks, type_errors, types, interfaces, tables, names } =
         check_project(programs, fbs, type_decls, &io, &mapped_inputs);
@@ -247,7 +248,7 @@ pub fn compile_sources(
     sources: &[ProgramSource],
     mappings: &[Mapping],
     config: &IoConfig,
-    tags: &[(String, DataType)],
+    tags: &[crate::TagDecl],
 ) -> (Option<CompiledProject>, CompileReport) {
     let n = sources.len();
     let mut errors: Vec<StErrors> = vec![StErrors::new(); n];
